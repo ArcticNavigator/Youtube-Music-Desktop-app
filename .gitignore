@@ -1,0 +1,46 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Secrets & local config (never commit)
+.env
+**/.env
+
+# Bundled GeoIP database (downloaded separately; CC-BY attribution in docs/PRIVACY.md)
+sidecar/data/*.mmdb
+
+# Python (sidecar/)
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Tauri generated schemas (regenerated on build; see src-tauri/.gitignore for /target)
+src-tauri/gen/schemas
+
+# Internal docs — keep PRIVACY.md only (App.tsx imports it directly via `?raw` at build
+# time); everything else here (smoke-test checklist, TODO, planning notes) stays local.
+docs/*
+!docs/PRIVACY.md

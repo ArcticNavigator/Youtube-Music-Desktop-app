@@ -1,0 +1,19 @@
+# Supabase project config (YouTube Music desktop — Phase 2 backend).
+# Only the bits this app relies on are set. Fill project_id if you link the CLI:
+#   supabase link --project-ref <ref>   (ref = the subdomain of your project URL)
+project_id = ""
+
+# Edge Functions authenticate callers with a Google access token (not a Supabase
+# JWT), so Supabase's built-in JWT gate must be OFF for all four. Each function does
+# its own verification (first-login / me-data) or needs none (whoami / signups-open).
+[functions.first-login]
+verify_jwt = false
+
+[functions.me-data]
+verify_jwt = false
+
+[functions.signups-open]
+verify_jwt = false
+
+[functions.whoami]
+verify_jwt = false

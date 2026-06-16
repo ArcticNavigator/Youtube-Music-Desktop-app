@@ -1,0 +1,39 @@
+[package]
+name = "youtube-music"
+version = "0.1.0"
+description = "YouTube Music Desktop App — NewPipe-style standalone client"
+authors = []
+edition = "2021"
+
+[lib]
+name = "youtube_music_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+dotenvy = "0.15"          # bake src-tauri/.env into the binary at build time
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+
+# ── OAuth (PKCE desktop flow) ──────────────────────────────────────────────────
+# rustls-tls (not native-tls) so we don't depend on a system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+jsonwebtoken = "9"        # verify Google's RS256 id_token against JWKS
+tiny_http = "0.12"        # one-shot loopback listener for the OAuth redirect
+url = "2"                 # build the auth URL / parse the callback query
+base64 = "0.22"           # PKCE verifier/challenge encoding
+sha2 = "0.10"             # PKCE S256 challenge
+open = "5"                # launch the system browser to Google's consent page
+keyring = { version = "3", features = ["windows-native"] }  # refresh token → Windows Credential Manager
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
