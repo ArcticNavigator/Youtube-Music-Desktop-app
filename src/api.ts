@@ -100,24 +100,6 @@ async function del<T>(path: string): Promise<T> {
 /** Check if the sidecar is running and ready. Called every second on app start. */
 export const health = () => get<{ status: string }>("/health");
 
-// ── Auth ───────────────────────────────────────────────────────────────────────
-
-/** Is the user currently signed in with Google? */
-export const authStatus = () => get<{ authenticated: boolean }>("/auth/status");
-
-/**
- * Start the Google OAuth login flow.
- * This opens the user's browser — they approve and the token is saved locally.
- */
-export const login = () => post<{ success: boolean; message: string }>("/auth/login");
-
-/** Sign out — deletes the saved OAuth token. */
-export const logout = () => post("/auth/logout");
-
-/** Get the logged-in user's profile (name + avatar). Requires authentication. */
-export const getProfile = () =>
-  get<{ accountName: string; accountPhotoUrl: string; channelHandle: string }>("/auth/profile");
-
 // ── Google OAuth (PKCE desktop flow, driven by the Rust shell) ──────────────────
 
 /** Verified identity returned by the Rust `oauth_begin` / `oauth_status` commands. */
@@ -245,9 +227,6 @@ export const getHome = () => get<{ shelves: HomeShelf[] }>("/home");
 
 // ── Tracks ─────────────────────────────────────────────────────────────────────
 
-/** Get metadata for a single track by its YouTube video ID. */
-export const getSong = (videoId: string) => get<SongInfo>(`/song/${videoId}`);
-
 /**
  * Get the direct audio stream URL for a track.
  * This is the NewPipe approach: bypasses YouTube's ad-serving player,
@@ -261,12 +240,6 @@ export const getStream = (videoId: string, title = "", artist = "") =>
 
 /** Get all tracks in a playlist. */
 export const getPlaylist = (playlistId: string) => get<Playlist>(`/playlist/${playlistId}`);
-
-// ── Personal Library (requires Google sign-in) ─────────────────────────────────
-
-/** Get the signed-in user's playlists. Returns 401 if not signed in. */
-export const getLibraryPlaylists = () =>
-  get<{ playlists: PlaylistSummary[] }>("/library/playlists");
 
 // ── YouTube Data API — your real playlists (OAuth works here, unlike InnerTube) ──
 
@@ -326,20 +299,6 @@ export const getRelated = (videoId: string) =>
 
 // ── Explore ────────────────────────────────────────────────────────────────────
 
-/** One mood/genre tile (e.g. "Chill", "Feel good", "Rock"). */
-export interface MoodTile {
-  title: string;
-  params: string;
-  color?: string;        // hex color if returned by the API
-  thumbnails?: Thumbnail[];
-}
-
-/** A category grouping mood tiles (e.g. "Moods & moments", "Genres"). */
-export interface MoodCategory {
-  title: string;
-  moods: MoodTile[];
-}
-
 /** A ranked chart entry — track with views + trend indicator. */
 export interface ChartTrack {
   videoId?: string;
@@ -352,13 +311,6 @@ export interface ChartTrack {
   trend?: string;   // "up" | "down" | "neutral" | "new"
   duration?: string;
 }
-
-/**
- * Fetch Moods & Genres categories for the Explore page.
- * Returns coloured mood tiles grouped by category.
- */
-export const getMoodCategories = () =>
-  get<{ categories: MoodCategory[] }>("/explore/moods");
 
 /**
  * Fetch music charts (default: global).
@@ -493,17 +445,6 @@ export interface HomeShelf {
   contents: SearchResult[];
   browseId?: string;   // present when ytmusicapi returns a shelf-level navigation target
   params?: string;
-}
-
-/** Detailed info for a single track. */
-export interface SongInfo {
-  videoDetails?: {
-    videoId: string;
-    title: string;
-    lengthSeconds: string;
-    author: string;
-    thumbnail?: { thumbnails: Thumbnail[] };
-  };
 }
 
 /**

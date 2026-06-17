@@ -1,6 +1,6 @@
 # YouTube Music Desktop
 
-_Last updated: 2026-06-15 · Policy version: **1**_
+_Last updated: 2026-06-17 · Policy version: **1**_
 
 This is a personal app shared privately with a small group (≤100 people). It is **not**
 a public product. This policy explains exactly what is collected, why, and your rights.
@@ -21,6 +21,11 @@ We do **not** store your IP address, precise location, listening history, playli
 or any Google content on our server. Your playlists/liked-songs live in your Google
 account and are read live via Google's API; your **play history is stored only on your
 own computer** (`%APPDATA%/YouTubeMusic/history.json`), never uploaded.
+
+If you use **Connect YouTube Music** for full personalization, your YouTube Music
+**session is stored only on your own device** (in your app-data folder) and is sent
+**only to YouTube** and the app's local helper to load your personalized content. It
+is **never** sent to our server. Disconnecting deletes it from your device.
 
 ## Guest mode = no record
 

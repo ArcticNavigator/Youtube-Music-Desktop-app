@@ -12,12 +12,12 @@
 #   API key needed, no rate limits, same data the official app sees.
 #
 # TWO MODES:
-#   - Public functions (search, home, get_song, get_playlist):
+#   - Public functions (search, home, get_playlist, get_album, get_artist):
 #     Work without any login. These hit YouTube's public InnerTube endpoints.
 #
-#   - Library functions (get_library_playlists, get_liked_songs, get_history):
-#     Require Google OAuth. The token is loaded from auth.TOKEN_PATH.
-#     Always check auth.is_authenticated() before calling these.
+#   - Library functions (get_library_artists/albums, get_liked_songs, get_history):
+#     Require the YouTube Music session cookie (installed via the in-app login).
+#     get_ytmusic(authenticated=True) returns the cookie client when one is present.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from auth import get_ytmusic, has_ytmusic_cookie
@@ -109,15 +109,6 @@ def get_home(authenticated: bool | None = None) -> list[dict]:
     return shelves
 
 
-def get_song(video_id: str) -> dict:
-    """
-    Get detailed metadata for a single track.
-    Returns videoDetails (title, author, duration, thumbnail) and more.
-    """
-    yt = get_ytmusic(authenticated=False)
-    return yt.get_song(video_id)
-
-
 def get_search_suggestions(query: str) -> list[str]:
     """
     Get autocomplete suggestions for a partial search query.
@@ -146,17 +137,11 @@ def get_playlist(playlist_id: str) -> dict:
     return pl
 
 
-# ── Authenticated endpoints (require Google login) ─────────────────────────────
+# ── Authenticated endpoints (require the YT Music session cookie) ──────────────
 #
-# These functions call get_ytmusic(authenticated=True) which loads the OAuth
-# token saved by auth.login(). If no token exists, ytmusicapi will raise an
-# error — the caller (main.py) catches that and returns 401 Unauthorized.
-
-def get_library_playlists() -> list[dict]:
-    """Returns all playlists in the logged-in user's library."""
-    yt = get_ytmusic(authenticated=True)
-    return yt.get_library_playlists(limit=25)
-
+# These call get_ytmusic(authenticated=True), which prefers the cookie/browser
+# client (full InnerTube access). If no session is installed, ytmusicapi raises —
+# the caller (main.py) catches that and returns 401/409.
 
 def get_library_artists() -> list[dict]:
     """Artists in the signed-in user's library. Needs the YT Music session cookie
@@ -190,28 +175,6 @@ def get_history() -> list[dict]:
     """Returns the user's recently played tracks."""
     yt = get_ytmusic(authenticated=True)
     return _ensure_thumbnails(yt.get_history())
-
-
-def get_account_info() -> dict:
-    """
-    Returns the logged-in user's profile info.
-    Keys: accountName, accountPhotoUrl, channelHandle
-    """
-    yt = get_ytmusic(authenticated=True)
-    return yt.get_account_info()
-
-
-def get_mood_categories() -> list[dict]:
-    """
-    Returns mood & genre categories for the Explore page.
-    Each category has a title and a list of mood tiles (title, params, thumbnails).
-    Works without login.
-    """
-    yt = get_ytmusic(authenticated=False)
-    try:
-        return yt.get_mood_categories()
-    except Exception:
-        return []
 
 
 def get_charts(country: str = "ZZ") -> dict:

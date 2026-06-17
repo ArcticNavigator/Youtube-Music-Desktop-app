@@ -230,27 +230,6 @@ async def ytmusic_cookie_status():
     return {"connected": auth.has_ytmusic_cookie()}
 
 
-@app.get("/auth/profile")
-async def auth_profile():
-    """
-    Returns the logged-in user's name and avatar URL.
-    Requires authentication — call /auth/status first to check.
-    """
-    if not auth.is_authenticated():
-        raise HTTPException(status_code=401, detail="Not authenticated. Please sign in.")
-    try:
-        data = await asyncio.get_event_loop().run_in_executor(
-            None, youtube_music.get_account_info
-        )
-        return {
-            "accountName": data.get("accountName", ""),
-            "accountPhotoUrl": data.get("accountPhotoUrl", ""),
-            "channelHandle": data.get("channelHandle", ""),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ── SECTION 3: Search and Discovery ───────────────────────────────────────────
 #
 # These endpoints work without login — they use YouTube Music's public data.
@@ -392,21 +371,6 @@ async def home():
 
 # ── SECTION 4: Track and Playlist info ────────────────────────────────────────
 
-@app.get("/song/{video_id}")
-async def get_song(video_id: str):
-    """
-    Get metadata for a single track: title, artist, duration, thumbnail.
-    video_id is YouTube's unique ID for the track (e.g. "dQw4w9WgXcQ").
-    """
-    try:
-        data = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: youtube_music.get_song(video_id)
-        )
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/playlist/{playlist_id}")
 async def get_playlist(playlist_id: str):
     """
@@ -482,21 +446,6 @@ async def get_stream(
 
 
 # ── SECTION 6: Personal Library (requires login) ───────────────────────────────
-
-@app.get("/library/playlists")
-async def library_playlists():
-    """Returns the logged-in user's playlists. Requires authentication."""
-    if not auth.is_authenticated():
-        raise HTTPException(status_code=401, detail="Not authenticated. Please sign in.")
-    try:
-        data = await asyncio.get_event_loop().run_in_executor(
-            None, youtube_music.get_library_playlists
-        )
-        return {"playlists": data}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/library/artists")
 async def library_artists():
@@ -738,22 +687,7 @@ async def yt_playlist_remove(item_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── SECTION 6b: Explore — Moods & Charts ──────────────────────────────────────
-
-@app.get("/explore/moods")
-async def explore_moods():
-    """
-    Returns mood & genre categories for the Explore page.
-    Used to render the coloured mood tile grid (Moods & Genres section).
-    """
-    try:
-        data = await asyncio.get_event_loop().run_in_executor(
-            None, youtube_music.get_mood_categories
-        )
-        return {"categories": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ── SECTION 6b: Explore — Charts ──────────────────────────────────────────────
 
 @app.get("/explore/charts")
 async def explore_charts(

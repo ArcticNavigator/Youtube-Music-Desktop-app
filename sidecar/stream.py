@@ -45,12 +45,13 @@ class _NullLogger:
 _NULL_LOGGER = _NullLogger()
 
 # Shared base options (no client-specific settings here).
+# We keep TLS certificate verification ON (yt-dlp's default): disabling it to shave a
+# few ms would expose stream extraction to man-in-the-middle tampering of the CDN URL.
 _BASE_YDL_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "logger": _NULL_LOGGER,
     "socket_timeout": 8,        # tighter timeout — fail fast
-    "nocheckcertificate": True, # skip SSL cert check (cuts ~50-200 ms on cold connections)
     "youtube_include_dash_manifest": False,  # skip DASH manifest fetch (saves a roundtrip)
     "youtube_include_hls_manifest": False,
 }
