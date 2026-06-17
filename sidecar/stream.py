@@ -58,10 +58,10 @@ _BASE_YDL_OPTS = {
 }
 
 # ── ffmpeg resolution ─────────────────────────────────────────────────────────
-# Only the download path uses ffmpeg (audio extraction + metadata); stream-URL
-# extraction never touches it. ffmpeg ships via the `imageio-ffmpeg` pip package,
-# which PyInstaller freezes into the sidecar — so packaged builds find it with no
-# system install and no separate ffprobe (we embed cover art with mutagen instead).
+# Only the download path uses ffmpeg (audio extraction + metadata + cover art);
+# stream-URL extraction never touches it. ffmpeg ships via the `imageio-ffmpeg` pip
+# package, which PyInstaller freezes into the sidecar — so packaged builds find it
+# with no system install and no separate ffprobe needed.
 # An explicit override (set_ffmpeg_location) wins; otherwise we use imageio-ffmpeg's
 # binary, else fall back to ffmpeg on PATH.
 _ffmpeg_override: "str | None" = None

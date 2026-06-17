@@ -939,6 +939,10 @@ if __name__ == "__main__":
     parser.add_argument("--ffmpeg-location", default=None,
                         help="Path to the bundled ffmpeg/ffprobe directory (packaged builds). "
                              "Omit in dev to use ffmpeg from PATH.")
+    parser.add_argument("--supabase-url", default=None,
+                        help="Supabase project URL (baked in at build time for packaged builds).")
+    parser.add_argument("--supabase-anon-key", default=None,
+                        help="Supabase anon key (baked in at build time for packaged builds).")
     args = parser.parse_args()
 
     # Activate the localhost auth guard when Rust supplies a token.
@@ -948,6 +952,11 @@ if __name__ == "__main__":
     # Point yt-dlp at the bundled ffmpeg so downloads work without a system install.
     if args.ffmpeg_location:
         stream_module.set_ffmpeg_location(args.ffmpeg_location)
+
+    # Inject Supabase credentials passed by the Rust shell (packaged builds only —
+    # dev reads sidecar/.env directly via load_dotenv in data.py).
+    if args.supabase_url or args.supabase_anon_key:
+        data.configure(args.supabase_url or "", args.supabase_anon_key or "")
 
     print(f"Sidecar starting on http://{args.host}:{args.port}")
     print(f"API docs: http://{args.host}:{args.port}/docs")

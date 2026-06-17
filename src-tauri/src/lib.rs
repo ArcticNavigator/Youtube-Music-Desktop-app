@@ -169,6 +169,19 @@ fn start_sidecar(app: &tauri::AppHandle) {
         .arg("--auth-token")
         .arg(sidecar_token_value());
 
+    // Supabase anon credentials — safe to bake in (anon key is public; RLS is the guard).
+    // Lets the frozen sidecar record first-logins and enforce the ≤100 cap without a .env.
+    if let Some(url) = option_env!("SUPABASE_URL") {
+        if !url.is_empty() {
+            command.arg("--supabase-url").arg(url);
+        }
+    }
+    if let Some(key) = option_env!("SUPABASE_ANON_KEY") {
+        if !key.is_empty() {
+            command.arg("--supabase-anon-key").arg(key);
+        }
+    }
+
     // On Windows, stop the frozen console subprocess from flashing its own window.
     #[cfg(target_os = "windows")]
     {

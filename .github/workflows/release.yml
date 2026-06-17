@@ -1,0 +1,113 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Release — build signed installers for Windows, macOS and Linux, and publish a
+# (draft) GitHub Release with the auto-update manifest (latest.json).
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Trigger: push a version tag (e.g. `git tag v0.1.0 && git push --tags`), or run
+# it manually from the Actions tab.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   GOOGLE_CLIENT_ID                 Desktop OAuth client id  (baked in at build)
+#   GOOGLE_CLIENT_SECRET             Desktop OAuth client secret
+#   TAURI_SIGNING_PRIVATE_KEY        Contents of ~/.tauri/ytmusic-updater.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   The key password (empty string is fine)
+#   SUPABASE_URL                     Supabase project URL (baked in for ≤100 cap)
+#   SUPABASE_ANON_KEY                Supabase anon/public key
+#
+# Each runner freezes the sidecar with PyInstaller; imageio-ffmpeg pulls in that
+# platform's ffmpeg automatically, so downloads work on every OS with no extra setup.
+#
+# The release is created as a DRAFT — review the assets, then hit Publish. The
+# updater endpoint (https://github.com/OWNER/REPO/releases/latest/download/latest.json)
+# only resolves once a release is PUBLISHED, so nothing auto-updates until you do.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          - platform: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            patchelf build-essential libssl-dev libgtk-3-dev
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install sidecar dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r sidecar/requirements.txt pyinstaller
+
+      - name: Freeze sidecar (PyInstaller)
+        working-directory: sidecar
+        run: >
+          pyinstaller ytmusic-sidecar.spec --noconfirm
+          --distpath ../src-tauri/sidecar-dist
+          --workpath ../build/pyinstaller
+
+      - name: Write build-time config
+        shell: bash
+        run: |
+          printf 'GOOGLE_CLIENT_ID=%s\nGOOGLE_CLIENT_SECRET=%s\nSUPABASE_URL=%s\nSUPABASE_ANON_KEY=%s\n' \
+            "${{ secrets.GOOGLE_CLIENT_ID }}" "${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+            "${{ secrets.SUPABASE_URL }}" "${{ secrets.SUPABASE_ANON_KEY }}" \
+            > src-tauri/.env
+
+      - name: Build, sign and publish (draft) release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "YouTube Music ${{ github.ref_name }}"
+          releaseBody: "Download the installer for your platform below. The app auto-updates to future releases."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

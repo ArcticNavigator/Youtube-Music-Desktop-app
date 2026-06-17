@@ -48,6 +48,3 @@ build/pyinstaller/
 # time); everything else here (smoke-test checklist, TODO, planning notes) stays local.
 docs/*
 !docs/PRIVACY.md
-
-# Release CI — built and published manually; not needed in the public repo.
-.github/workflows/release.yml

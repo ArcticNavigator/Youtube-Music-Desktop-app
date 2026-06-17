@@ -34,6 +34,22 @@ SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or ""
 _FUNCTIONS = f"{SUPABASE_URL}/functions/v1" if SUPABASE_URL else ""
 
+
+def configure(url: str, anon_key: str) -> None:
+    """Override Supabase credentials at runtime.
+
+    Called by main.py when the Rust shell passes --supabase-url / --supabase-anon-key
+    (values baked in at compile time from src-tauri/.env). The frozen sidecar can't
+    read sidecar/.env, so this is the only path that works in packaged builds.
+    The anon key is safe to bake in — RLS is the actual security guard, not the key.
+    """
+    global SUPABASE_URL, ANON_KEY, _FUNCTIONS
+    if url:
+        SUPABASE_URL = url.rstrip("/")
+        _FUNCTIONS = f"{SUPABASE_URL}/functions/v1"
+    if anon_key:
+        ANON_KEY = anon_key
+
 # Bump when the pre-sign-in notice wording materially changes (stored per record).
 POLICY_VERSION = "1"
 
