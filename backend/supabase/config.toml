@@ -17,3 +17,6 @@ verify_jwt = false
 
 [functions.whoami]
 verify_jwt = false
+
+[functions.feedback]
+verify_jwt = false

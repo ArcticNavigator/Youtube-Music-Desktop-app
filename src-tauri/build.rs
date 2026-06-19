@@ -9,5 +9,11 @@ fn main() {
         }
     }
 
+    // Re-link (and re-embed the app icon) whenever the icon files change.
+    // tauri_build doesn't watch these reliably, so a `tauri icon` regen would
+    // otherwise be ignored and the old icon stays baked into the binary.
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-changed=icons/icon.png");
+
     tauri_build::build()
 }

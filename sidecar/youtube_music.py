@@ -82,6 +82,31 @@ def search(query: str, filter_type: str = None) -> list[dict]:
         return []
 
 
+# Evergreen song search used to seed the GUEST home with directly-playable tracks.
+# The anonymous YouTube Music home returns ONLY playlist/album cards (every item has
+# a playlistId/browseId but no videoId), so guests get nothing to click-play and the
+# covers — googleusercontent URLs with no videoId — have no i.ytimg.com fallback if
+# they hiccup. A song search returns real tracks (videoId + thumbnails), which play on
+# click and fall back to the reliable i.ytimg.com cover. Connected users keep their
+# personalized feed, so this shelf is added in guest mode only.
+_GUEST_SONG_SHELF = ("Trending songs", "top hits")
+
+
+def _guest_song_shelf(yt, title: str, query: str) -> dict | None:
+    """Build a home shelf of playable songs from a song search. Returns None on any
+    failure (or no playable results) so a flaky search never blocks the rest of the
+    home — the guest still gets the regular playlist/album shelves."""
+    try:
+        results = yt.search(query, filter="songs", limit=25)
+    except Exception:
+        return None
+    songs = [r for r in (results or []) if isinstance(r, dict) and r.get("videoId")]
+    if not songs:
+        return None
+    _ensure_thumbnails(songs)
+    return {"title": title, "contents": songs}
+
+
 def get_home(authenticated: bool | None = None) -> list[dict]:
     """
     Fetch the YouTube Music home page.
@@ -101,11 +126,18 @@ def get_home(authenticated: bool | None = None) -> list[dict]:
     if authenticated is None:
         authenticated = has_ytmusic_cookie()
     yt = get_ytmusic(authenticated=authenticated)
-    shelves = yt.get_home(limit=10)
+    shelves = yt.get_home(limit=10) or []
     # Fill missing thumbnails for every track across every shelf
-    for shelf in shelves or []:
+    for shelf in shelves:
         if isinstance(shelf, dict):
             _ensure_thumbnails(shelf.get("contents"))
+    # GUEST mode only: the anonymous home has no directly-playable songs (all
+    # playlist/album cards), so prepend a shelf of real tracks the user can play.
+    if not authenticated:
+        title, query = _GUEST_SONG_SHELF
+        song_shelf = _guest_song_shelf(yt, title, query)
+        if song_shelf:
+            shelves = [song_shelf] + shelves
     return shelves
 
 
@@ -238,16 +270,14 @@ def get_album(browse_id: str) -> dict:
     Album tracks share the album cover and carry no per-track thumbnail, so we
     fill each track's thumbnails from its videoId (i.ytimg fallback). The album
     cover itself is on the top-level `thumbnails`.
-    Works without login.
+    Uses the authenticated client when available (richer data); falls back to
+    anonymous. Raises on failure so callers get a proper 500.
     """
-    yt = get_ytmusic(authenticated=False)
-    try:
-        data = yt.get_album(browseId=browse_id)
-        if isinstance(data, dict):
-            _ensure_thumbnails(data.get("tracks"))
-        return data
-    except Exception:
-        return {"title": "", "tracks": []}
+    yt = get_ytmusic(authenticated=has_ytmusic_cookie())
+    data = yt.get_album(browseId=browse_id)
+    if isinstance(data, dict):
+        _ensure_thumbnails(data.get("tracks"))
+    return data
 
 
 def get_artist(channel_id: str) -> dict:
@@ -259,22 +289,108 @@ def get_artist(channel_id: str) -> dict:
                albums: { browseId, results },
                singles: { browseId, results },
                related: { results } }
-    Works without login.
+    Uses the authenticated client when available (more complete data);
+    falls back to anonymous. Raises on failure so callers get a proper 500.
     """
-    yt = get_ytmusic(authenticated=False)
+    yt = get_ytmusic(authenticated=has_ytmusic_cookie())
+    data = yt.get_artist(channelId=channel_id)
+    # Normalise thumbnails on every nested result list so the frontend
+    # always sees `thumbnails` (never just `thumbnail`) and songs with
+    # a videoId get a guaranteed i.ytimg.com fallback URL. Albums,
+    # singles, and related artists keep whatever the API returned —
+    # they have no videoId, so missing thumbnails will be rendered as
+    # a CSS placeholder on the frontend instead of a broken image.
+    if isinstance(data, dict):
+        for key in ("songs", "albums", "singles", "related"):
+            section = data.get(key)
+            if isinstance(section, dict):
+                _ensure_thumbnails(section.get("results"))
+    return data
+
+
+# ── Podcasts ───────────────────────────────────────────────────────────────────
+#
+# YouTube Music has no public "podcast home / browse-by-category" endpoint, so we
+# build the browse page the way the Explore page works: a curated list of topics,
+# each populated with a podcast search. `filter="podcasts"` returns real shows
+# (resultType="podcast", browseId="MPSPPL..."). The topic list mirrors YT Music's
+# own podcast categories, plus India-focused shelves at the end.
+
+_PODCAST_TOPICS: list[tuple[str, str]] = [
+    ("Popular shows", "podcasts"),
+    ("News", "news"),
+    ("Comedy", "comedy"),
+    ("True Crime", "true crime"),
+    ("Business", "business"),
+    ("Marketing", "marketing"),
+    ("Finance", "finance"),
+    ("Technology", "technology"),
+    ("Science", "science"),
+    ("Films & TV", "film and television"),
+    ("Lifestyle", "lifestyle"),
+    ("Health & Fitness", "health and fitness"),
+    ("Love & Relationships", "relationships"),
+    ("Politics", "politics"),
+    ("Government", "government"),
+    ("Religion & Spirituality", "religion spirituality"),
+    ("History", "history"),
+    ("Education", "education"),
+    ("Society & Culture", "society and culture"),
+    ("Meditation", "meditation"),
+    ("Fiction", "fiction"),
+    ("Soccer", "soccer"),
+    ("Sports", "sports"),
+    ("Hindi", "hindi"),
+    ("Indian", "indian"),
+]
+
+
+def _podcast_cards(query: str, limit: int = 20) -> list[dict]:
+    """Search podcasts for one topic, keep only real shows (drop the occasional
+    song/video the search mixes in), and normalize thumbnails for the frontend."""
     try:
-        data = yt.get_artist(channelId=channel_id)
-        # Normalise thumbnails on every nested result list so the frontend
-        # always sees `thumbnails` (never just `thumbnail`) and songs with
-        # a videoId get a guaranteed i.ytimg.com fallback URL. Albums,
-        # singles, and related artists keep whatever the API returned —
-        # they have no videoId, so missing thumbnails will be rendered as
-        # a CSS placeholder on the frontend instead of a broken image.
-        if isinstance(data, dict):
-            for key in ("songs", "albums", "singles", "related"):
-                section = data.get(key)
-                if isinstance(section, dict):
-                    _ensure_thumbnails(section.get("results"))
-        return data
+        results = get_ytmusic(authenticated=False).search(
+            query, filter="podcasts", limit=limit
+        )
     except Exception:
-        return {"name": "", "channelId": channel_id}
+        return []
+    shows = [
+        r for r in (results or [])
+        if isinstance(r, dict)
+        and r.get("resultType") == "podcast"
+        and str(r.get("browseId", "")).startswith("MPSPPL")
+    ]
+    return _ensure_thumbnails(shows)
+
+
+def get_podcast_browse() -> list[dict]:
+    """Build the podcasts page: one shelf per topic, each a podcast search. Topics
+    are fetched CONCURRENTLY (a thread pool) so ~25 searches finish in a few seconds
+    instead of serially. Order is preserved; empty shelves are dropped. The caller
+    (main.py) caches the whole thing to disk so this only runs occasionally."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(item: tuple[str, str]) -> dict:
+        title, query = item
+        return {"title": title, "contents": _podcast_cards(query)}
+
+    shelves: list[dict] = []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for shelf in ex.map(fetch, _PODCAST_TOPICS):  # map preserves input order
+            if shelf["contents"]:
+                shelves.append(shelf)
+    return shelves
+
+
+def get_podcast(browse_id: str) -> dict:
+    """Full podcast page: cover, author, description, and the episode list. Each
+    episode carries a videoId, so it plays through the normal stream pipeline like
+    any song. browse_id is the show's "MPSPPL..." id from a podcast card.
+    Returns: { title, author, description, thumbnails, episodes: [ {videoId, title,
+               description, duration, date, thumbnails}, ... ] }"""
+    yt = get_ytmusic(authenticated=has_ytmusic_cookie())
+    data = yt.get_podcast(browse_id, limit=100)
+    if isinstance(data, dict):
+        # Episodes have a videoId, so missing covers fall back to i.ytimg.com.
+        _ensure_thumbnails(data.get("episodes"))
+    return data

@@ -16,9 +16,18 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const LOGIN_LABEL: &str = "ytmusic-login";
+// Hidden window used on startup to silently re-rotate the Google session cookies.
+const REFRESH_LABEL: &str = "ytmusic-refresh";
 const YTM_URL: &str = "https://music.youtube.com/";
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// Only do the (slow) webview refresh when the stored cookie is older than this — so
+// frequent restarts stay instant, but a session left to go stale (overnight+) is
+// refreshed. Google rotates __Secure-3PSIDTS/SIDCC roughly daily; 6h is a safe margin.
+const REFRESH_AFTER: Duration = Duration::from_secs(6 * 3600);
+// How long to let the hidden YTM page load + run Google's background cookie rotation
+// before we read the refreshed cookies back out of the shared store.
+const REFRESH_WAIT: Duration = Duration::from_secs(7);
 
 fn sidecar_base() -> String {
     format!("http://127.0.0.1:{}", crate::SIDECAR_PORT)
@@ -202,8 +211,8 @@ pub async fn ytmusic_disconnect() -> Result<(), String> {
     Ok(())
 }
 
-/// On startup, silently re-push any stored cookie to the sidecar. Returns whether a
-/// working session was restored.
+/// Push the on-disk cookie to the sidecar as-is (no rotation). Used when the stored
+/// cookie is still fresh, or as a fallback if a refresh can't complete.
 pub async fn restore() -> bool {
     tauri::async_runtime::spawn_blocking(|| match load_cookie() {
         Some(cookie) => push_cookie_to_sidecar(&cookie)
@@ -216,7 +225,92 @@ pub async fn restore() -> bool {
     .unwrap_or(false)
 }
 
+/// True when the stored cookie was written recently enough that its rotating Google
+/// session tokens (__Secure-3PSIDTS / SIDCC) should still be valid — so we can skip
+/// the webview refresh and just push it.
+fn cookie_is_fresh() -> bool {
+    cookie_file_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .map(|age| age < REFRESH_AFTER)
+        .unwrap_or(false)
+}
+
+/// Silently RE-ROTATE the Google session before pushing it. The stored cookie's
+/// rotating tokens (__Secure-3PSIDTS / SIDCC) go stale after ~a day; once stale,
+/// basic SAPISIDHASH auth still works (library/playback) but personalized endpoints
+/// (home "Quick picks", history, account) start failing — so the home silently
+/// degrades to a generic logged-in feed. To refresh them the way a real browser does,
+/// we open a hidden, off-screen webview to music.youtube.com (the persisted SID
+/// cookies are valid for months, so Google rotates SIDTS as the page loads), then
+/// re-read the freshened cookies from the shared store, persist them, and push to the
+/// sidecar. Falls back to the on-disk cookie if anything goes wrong.
+async fn refresh_and_push(app: AppHandle) -> bool {
+    if load_cookie().is_none() {
+        return false; // nothing connected — nothing to restore
+    }
+    // Recently refreshed → skip the slow rotation, just push what we have.
+    if cookie_is_fresh() {
+        return restore().await;
+    }
+    let url: tauri::Url = match YTM_URL.parse() {
+        Ok(u) => u,
+        Err(_) => return restore().await,
+    };
+
+    // Build a hidden, unfocused, taskbar-less webview pointed at YTM. Loading the page
+    // with valid SID cookies triggers Google's background cookie rotation in the shared
+    // store. If it can't be created, fall back to pushing the stored cookie.
+    if app.get_webview_window(REFRESH_LABEL).is_none()
+        && WebviewWindowBuilder::new(&app, REFRESH_LABEL, WebviewUrl::External(url.clone()))
+            .title("")
+            .inner_size(420.0, 600.0)
+            .visible(false)
+            .focused(false)
+            .skip_taskbar(true)
+            .user_agent(CHROME_UA)
+            .build()
+            .is_err()
+    {
+        return restore().await;
+    }
+
+    // Give the page time to load + rotate the cookies (runs in the webview process; we
+    // just wait off the async executor).
+    let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(REFRESH_WAIT)).await;
+
+    // Read the (hopefully refreshed) cookies from the shared store, then close the
+    // hidden window regardless of outcome.
+    let refreshed = app
+        .get_webview_window(REFRESH_LABEL)
+        .or_else(|| app.get_webview_window("main"))
+        .and_then(|w| w.cookies_for_url(url).ok())
+        .and_then(|cs| build_cookie_header(&cs));
+    if let Some(w) = app.get_webview_window(REFRESH_LABEL) {
+        let _ = w.close();
+    }
+
+    match refreshed {
+        // Got a fresh session → persist it (advances the freshness clock) and push.
+        Some(cookie) => {
+            store_cookie(&cookie);
+            tauri::async_runtime::spawn_blocking(move || {
+                push_cookie_to_sidecar(&cookie)
+                    .ok()
+                    .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+                    .unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false)
+        }
+        // Rotation produced nothing usable (e.g. store logged out) → push the stored
+        // cookie unchanged so we don't drop a session that may still partly work.
+        None => restore().await,
+    }
+}
+
 #[tauri::command]
-pub async fn ytmusic_restore() -> Result<bool, String> {
-    Ok(restore().await)
+pub async fn ytmusic_restore(app: AppHandle) -> Result<bool, String> {
+    Ok(refresh_and_push(app).await)
 }

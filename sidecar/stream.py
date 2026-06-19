@@ -115,7 +115,7 @@ def _cache_set(video_id: str, data: dict) -> None:
 # android often succeeds without needing the full slow-path chain.
 _FAST_EXTRACTOR = {
     "youtube": {
-        "player_client": ["ios", "android"],
+        "player_client": ["android_music", "ios", "android"],
         "player_skip": ["js", "webpage"],
     }
 }

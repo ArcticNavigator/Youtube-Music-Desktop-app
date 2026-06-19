@@ -14,6 +14,9 @@
 # uvicorn protocol loops, pydantic-core, the maxminddb reader), which a plain import
 # scan would miss.
 
+import glob
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
@@ -23,6 +26,13 @@ for _pkg in ("ytmusicapi", "yt_dlp", "uvicorn", "fastapi", "pydantic", "geoip2",
     datas += _d
     binaries += _b
     hiddenimports += _h
+
+# Bundle the on-device GeoIP DB (coarse location for the first-login compliance
+# record). collect_all only grabs the geoip2 *package*, not our data/ file — so add it
+# explicitly into a "data" subdir, matching data.py's `_HERE / "data"` lookup. Glob so
+# monthly DB-IP refreshes are picked up automatically without editing this spec.
+for _mmdb in glob.glob(os.path.join("data", "*.mmdb")):
+    datas.append((_mmdb, "data"))
 
 a = Analysis(
     ["main.py"],

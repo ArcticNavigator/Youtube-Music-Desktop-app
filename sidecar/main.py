@@ -26,6 +26,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -35,12 +36,13 @@ import time
 import traceback
 import urllib.request
 import urllib.parse
+from collections import OrderedDict
 from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 # Our own modules (in the same sidecar/ folder)
@@ -64,7 +66,10 @@ import stream as stream_module
 _AUTH_TOKEN: Optional[str] = None
 
 # Paths that never require the bearer token (readiness probe + CORS preflight).
-_OPEN_PATHS = {"/health"}
+# /thumb is open because the webview loads it via <img src>, which cannot attach
+# the Authorization header. It's safe: it only proxies images from a fixed YouTube
+# CDN host allowlist (no general SSRF) and the loopback Host guard still applies.
+_OPEN_PATHS = {"/health", "/thumb"}
 
 # Host header must be loopback — blocks DNS-rebinding attacks where a remote page
 # resolves an attacker domain to 127.0.0.1 and tries to drive the sidecar.
@@ -113,14 +118,41 @@ async def _localhost_guard(request: Request, call_next):
 # Added AFTER the guard above so it wraps it (outermost) and handles preflight first.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:1420",       # Vite dev server
-        "tauri://localhost",           # Tauri production (Windows)
-        "https://tauri.localhost",     # Tauri production (macOS/Linux)
-    ],
+    # The packaged webview's origin differs by platform/version, and getting it wrong
+    # means EVERY sidecar fetch is CORS-blocked and the app hangs on the splash:
+    #   Windows     → http://tauri.localhost      (Tauri v2)
+    #   macOS/Linux → tauri://localhost
+    #   dev (Vite)  → http://localhost:1420
+    # A regex matches all loopback/tauri variants (with optional port) so no packaged
+    # build is ever blocked, while still refusing arbitrary remote origins.
+    allow_origin_regex=r"^(tauri://localhost|https?://(tauri\.)?localhost(:\d+)?)$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _silence_connection_reset():
+    """On Windows the asyncio Proactor event loop logs a full ConnectionResetError
+    traceback ('[WinError 10054] An existing connection was forcibly closed…') whenever
+    a client drops a connection mid-response. The webview does this routinely — e.g. the
+    /stream audio endpoint on seek / track change / app close. It's completely harmless
+    (the request was simply abandoned), but the traceback looks alarming in the console.
+    We install a loop exception handler that swallows exactly that case and passes
+    everything else through to the default handler."""
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+
+    def handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError):
+            return  # benign client disconnect — ignore the noise
+        if previous is not None:
+            previous(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
 
 
 # ── SECTION 1: Health check ────────────────────────────────────────────────────
@@ -190,7 +222,11 @@ async def set_ytmusic_cookie(body: _CookieIn):
     this request never holds a slow InnerTube call on the wire (which was getting the
     localhost connection reset on Windows). Verify separately via the /test endpoint.
     """
-    auth.set_ytmusic_cookie(body.cookie)
+    changed = auth.set_ytmusic_cookie(body.cookie)
+    if changed:
+        # Fresh login or a rotated session — drop any cached personalized home so a
+        # stale (possibly token-degraded) feed isn't served after the re-auth.
+        _clear_home_cache()
     return {"ok": True}
 
 
@@ -365,6 +401,198 @@ async def home():
         if authed and data:
             threading.Thread(target=lambda: _save_home_cache(data, authed=True), daemon=True).start()
         return {"shelves": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Thumbnail proxy + cache ────────────────────────────────────────────────────
+#
+# Album/playlist/artist covers come from yt3.googleusercontent.com. They have no
+# videoId, so the frontend can't fall back to the rock-solid i.ytimg.com CDN if a
+# cover fails. When the home renders dozens of <img>s at once, googleusercontent
+# throttles the burst (HTTP 429 / dropped streams) and those covers vanish to the ♫
+# placeholder. This proxy fixes that: the webview loads every such cover from
+# 127.0.0.1 instead, and the sidecar fetches each unique URL ONCE (sequentially,
+# with retries) and caches the bytes in memory + on disk. The browser never touches
+# googleusercontent directly, so there's no burst to throttle. Repeat opens are
+# instant from cache. Host-allowlisted to YouTube image CDNs only — no general SSRF.
+
+_THUMB_CACHE_DIR = os.path.join(
+    os.getenv("APPDATA", os.path.expanduser("~")), "YouTubeMusic", "thumb_cache"
+)
+_THUMB_ALLOWED = ("googleusercontent.com", "ggpht.com", "ytimg.com")
+_THUMB_MEM: "OrderedDict[str, bytes]" = OrderedDict()
+_THUMB_MEM_CAP = 256
+_THUMB_LOCK = threading.Lock()
+_THUMB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+def _thumb_host_ok(u: str) -> bool:
+    """True only for http(s) URLs on a YouTube image CDN. Blocks file://, other
+    schemes, and look-alike hosts (e.g. evilgoogleusercontent.com) so the open
+    endpoint can never be used as a general-purpose SSRF proxy."""
+    p = urllib.parse.urlparse(u)
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in _THUMB_ALLOWED)
+
+
+def _thumb_mem_get(key: str) -> Optional[bytes]:
+    with _THUMB_LOCK:
+        if key in _THUMB_MEM:
+            _THUMB_MEM.move_to_end(key)
+            return _THUMB_MEM[key]
+    return None
+
+
+def _thumb_mem_put(key: str, data: bytes) -> None:
+    with _THUMB_LOCK:
+        _THUMB_MEM[key] = data
+        _THUMB_MEM.move_to_end(key)
+        while len(_THUMB_MEM) > _THUMB_MEM_CAP:
+            _THUMB_MEM.popitem(last=False)
+
+
+def _sniff_image_ct(data: bytes) -> str:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
+
+
+def _fetch_thumb(u: str) -> Optional[bytes]:
+    """Fetch an image with a couple of retries. A browser UA + music.youtube.com
+    referer keeps googleusercontent happy."""
+    req = urllib.request.Request(u, headers={
+        "User-Agent": _THUMB_UA,
+        "Referer": "https://music.youtube.com/",
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+    })
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return r.read()
+        except Exception:
+            time.sleep(0.3 * (attempt + 1))
+    return None
+
+
+@app.get("/thumb")
+def thumb_proxy(u: str = Query(..., description="Upstream image URL (YouTube CDN only)")):
+    """Loopback image proxy + cache for cover art. Defined as a sync `def` so FastAPI
+    runs it in the threadpool — the urllib fetch is blocking and must NOT stall the
+    asyncio event loop (the same trap the /lyrics endpoint hit). Unauthenticated (see
+    _OPEN_PATHS) because <img> can't send the bearer token; SSRF-guarded by host
+    allowlist."""
+    if not _thumb_host_ok(u):
+        raise HTTPException(status_code=400, detail="host not allowed")
+    key = hashlib.sha1(u.encode("utf-8")).hexdigest()
+    headers = {"Cache-Control": "public, max-age=604800"}  # 7 days
+
+    data = _thumb_mem_get(key)
+    if data is None:
+        try:
+            with open(os.path.join(_THUMB_CACHE_DIR, key), "rb") as f:
+                data = f.read()
+            _thumb_mem_put(key, data)
+        except Exception:
+            data = None
+    if data is None:
+        data = _fetch_thumb(u)
+        if not data:
+            raise HTTPException(status_code=502, detail="thumbnail fetch failed")
+        _thumb_mem_put(key, data)
+        try:
+            os.makedirs(_THUMB_CACHE_DIR, exist_ok=True)
+            with open(os.path.join(_THUMB_CACHE_DIR, key), "wb") as f:
+                f.write(data)
+        except Exception:
+            pass  # cache is best-effort; serving the bytes still succeeds
+
+    return Response(content=data, media_type=_sniff_image_ct(data), headers=headers)
+
+
+# ── Podcasts ───────────────────────────────────────────────────────────────────
+#
+# /podcasts builds a topic-shelf browse page from ~25 podcast searches. That's slow
+# to assemble (even fetched concurrently), and the categories barely change, so we
+# cache the whole page to disk for 6h and serve it stale-while-revalidate, exactly
+# like /home. /podcast/{id} returns one show's episodes (each playable by videoId).
+
+_PODCASTS_CACHE_PATH = os.path.join(
+    os.getenv("APPDATA", os.path.expanduser("~")), "YouTubeMusic", "podcasts_cache.json"
+)
+_PODCASTS_CACHE_TTL = 21600  # 6 hours
+_podcasts_refreshing = False
+_podcasts_refresh_lock = threading.Lock()
+
+
+def _load_podcasts_cache() -> Optional[list]:
+    try:
+        with open(_PODCASTS_CACHE_PATH, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if time.time() - cached.get("_ts", 0) < _PODCASTS_CACHE_TTL:
+            return cached.get("shelves")
+    except Exception:
+        pass
+    return None
+
+
+def _save_podcasts_cache(shelves: list) -> None:
+    try:
+        os.makedirs(os.path.dirname(_PODCASTS_CACHE_PATH), exist_ok=True)
+        with open(_PODCASTS_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"_ts": time.time(), "shelves": shelves}, f)
+    except Exception:
+        pass
+
+
+def _bg_refresh_podcasts() -> None:
+    global _podcasts_refreshing
+    with _podcasts_refresh_lock:
+        if _podcasts_refreshing:
+            return
+        _podcasts_refreshing = True
+    try:
+        shelves = youtube_music.get_podcast_browse()
+        if shelves:
+            _save_podcasts_cache(shelves)
+    except Exception:
+        pass
+    finally:
+        _podcasts_refreshing = False
+
+
+@app.get("/podcasts")
+def podcasts_browse():
+    """Podcast browse page — one shelf per topic. Sync `def` so the blocking
+    searches run in the threadpool (not the event loop). Served from the 6h disk
+    cache when warm, refreshing in the background; first ever call builds it."""
+    cached = _load_podcasts_cache()
+    if cached is not None:
+        threading.Thread(target=_bg_refresh_podcasts, daemon=True).start()
+        return {"shelves": cached}
+    try:
+        shelves = youtube_music.get_podcast_browse()
+        if shelves:
+            threading.Thread(target=lambda: _save_podcasts_cache(shelves), daemon=True).start()
+        return {"shelves": shelves}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/podcast/{browse_id}")
+def podcast_detail(browse_id: str):
+    """One podcast's full page: cover, author, description, and episodes."""
+    try:
+        return youtube_music.get_podcast(browse_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -618,6 +846,48 @@ async def me_data_erase():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Feedback / bug reports ─────────────────────────────────────────────────────
+
+class FeedbackBody(BaseModel):
+    type: str                          # "bug" | "feedback" | "feature" | "complaint"
+    message: str
+    email: Optional[str] = None        # optional contact; account email used if omitted
+    app_version: Optional[str] = None
+    diagnostics: Optional[dict] = None  # opt-in: recent in-app errors + context
+
+
+@app.post("/feedback")
+async def submit_feedback(body: FeedbackBody):
+    """Store an in-app feedback / bug report. Works for GUESTS (no auth required);
+    when signed in we attach the Google token so the Edge Function links the account
+    and can prefill the contact email. The sidecar adds the OS so the client doesn't
+    have to. The YT Music cookie is never involved."""
+    import platform as _platform
+
+    if not data.is_configured():
+        raise HTTPException(status_code=503, detail="Feedback backend is not configured.")
+    msg = (body.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="Message is required.")
+    if body.type not in ("bug", "feedback", "feature", "complaint"):
+        raise HTTPException(status_code=400, detail="Invalid feedback type.")
+
+    plat = f"{_platform.system()} {_platform.release()}".strip()
+    token = auth.get_access_token()  # None for guests — allowed
+    try:
+        return await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: data.submit_feedback(
+                type=body.type, message=msg, email=body.email,
+                app_version=body.app_version, platform_str=plat,
+                diagnostics=body.diagnostics, access_token=token,
+            ),
+        )
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 # ── SECTION 6e: YouTube Data API — your real playlists (OAuth works here) ──────
 #
 # Unlike the private InnerTube API (ytmusicapi), the official Data API accepts our
@@ -809,9 +1079,7 @@ def _lrclib_search(track_name: str, artist_name: str, *,
         req = urllib.request.Request(
             f"https://lrclib.net/api/search?{params}",
             headers={"User-Agent": "YouTubeMusicDesktop/1.0"})
-        # lrclib is sometimes slow from non-EU networks; 10s gives it a fair shot
-        # before we fall through to lyrics.ovh.
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             results = json.loads(resp.read().decode())
         if not isinstance(results, list):
             return {}
@@ -836,7 +1104,7 @@ def _lyricsovh(artist: str, title: str) -> str | None:
     try:
         url = f"https://api.lyrics.ovh/v1/{urllib.parse.quote(artist, safe='')}/{urllib.parse.quote(title, safe='')}"
         req = urllib.request.Request(url, headers={"User-Agent": "YouTubeMusicDesktop/1.0"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
+        with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode())
         lyrics = (data.get("lyrics") or "").strip()
         return lyrics or None
@@ -845,7 +1113,7 @@ def _lyricsovh(artist: str, title: str) -> str | None:
 
 
 @app.get("/lyrics")
-async def get_lyrics(
+def get_lyrics(
     title: str = Query(..., min_length=1, description="Track title"),
     artist: str = Query("", description="Artist name"),
     video_id: str = Query("", description="YouTube video ID — used for YT Music lyrics fallback"),
@@ -855,6 +1123,11 @@ async def get_lyrics(
       1. lrclib.net  — synced LRC lyrics, great English / K-pop / J-pop coverage.
       2. lyrics.ovh  — plain text, broader language coverage, free & no key.
       3. YouTube Music native — via ytmusicapi (limited but covers some licensed songs).
+
+    NOTE: sync def (not async) so FastAPI runs this in a thread pool, not the
+    asyncio event loop. The urllib calls inside _lrclib_search/_lyricsovh are
+    blocking I/O — putting them on the event loop would stall all other requests
+    (including /stream) for the full timeout duration.
     """
     clean_t = _clean_title(title)
     clean_a = _clean_artist(artist)

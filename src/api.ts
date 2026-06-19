@@ -54,6 +54,29 @@ async function authHeaders(): Promise<Record<string, string>> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// ── Thumbnail proxy ───────────────────────────────────────────────────────────
+//
+// Album/playlist/artist covers live on googleusercontent/ggpht. Loading dozens at
+// once gets throttled by that CDN (→ missing covers), and those items have no
+// videoId so there's no i.ytimg.com fallback. Route them through the sidecar's
+// /thumb proxy: it fetches each cover once and caches it, and the webview loads it
+// from 127.0.0.1 (no external throttling). Hosts that are already reliable
+// (i.ytimg.com) pass through untouched so they stay independent of the sidecar.
+const THUMB_PROXY_HOSTS = ["googleusercontent.com", "ggpht.com"];
+
+export function thumbProxyUrl(url: string): string {
+  if (!url) return url;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (THUMB_PROXY_HOSTS.some((d) => host === d || host.endsWith("." + d))) {
+      return `${BASE_URL}/thumb?u=${encodeURIComponent(url)}`;
+    }
+  } catch {
+    /* not an absolute URL — leave as-is */
+  }
+  return url;
+}
+
 // ── Core HTTP helpers ──────────────────────────────────────────────────────────
 //
 // These two functions handle all HTTP requests. Components never call fetch()
@@ -400,6 +423,53 @@ export interface AlbumData {
  */
 export const getAlbum = (browseId: string) =>
   get<AlbumData>(`/album/${encodeURIComponent(browseId)}`);
+
+/** One podcast episode. Has a videoId, so it plays like any track. */
+export interface Episode {
+  videoId: string;
+  title: string;
+  description?: string;
+  duration?: string;          // e.g. "54 min"
+  date?: string;              // e.g. "Jun 12, 2026"
+  thumbnails?: Thumbnail[];
+}
+
+/** Full podcast page returned by /podcast/{browseId}. */
+export interface PodcastDetail {
+  title: string;
+  author?: { name?: string } | string;
+  description?: string;
+  thumbnails?: Thumbnail[];   // the show cover
+  episodes: Episode[];
+}
+
+/**
+ * The podcasts browse page — topic shelves of podcast cards. Reuses the HomeShelf
+ * shape; each card is a SearchResult whose `browseId` is an "MPSPPL..." show id.
+ */
+export const getPodcastBrowse = () =>
+  get<{ shelves: HomeShelf[] }>("/podcasts");
+
+/** Fetch one podcast (cover, author, description, episodes) by its "MPSPPL..." id. */
+export const getPodcast = (browseId: string) =>
+  get<PodcastDetail>(`/podcast/${encodeURIComponent(browseId)}`);
+
+/** A feedback / bug report submission. `diagnostics` is opt-in (recent errors + context). */
+export interface FeedbackInput {
+  type: "bug" | "feedback" | "feature" | "complaint";
+  message: string;
+  email?: string;
+  app_version?: string;
+  diagnostics?: Record<string, unknown>;
+}
+
+/**
+ * Submit feedback / a bug report. Works signed-in or as a guest — the sidecar
+ * attaches the Google token (if any) + OS, and brokers the write through the
+ * `feedback` Edge Function (the app never holds the service_role key).
+ */
+export const submitFeedback = (input: FeedbackInput) =>
+  post<{ ok: boolean }>("/feedback", input);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type definitions

@@ -18,6 +18,8 @@ import "./App.css";
 
 const DOWNLOAD_DIR = "~/Music/YouTube Music";
 const SUGGEST_DELAY = 300;
+const SEARCH_HISTORY_KEY = "yt-music-search-history";
+const SEARCH_HISTORY_MAX = 15;
 
 // Mood tile colour palette — cycles through when the API doesn't return a colour.
 // Chosen to match the vibrant palette YouTube Music uses.
@@ -89,7 +91,9 @@ type View =
   | "podcasts"
   | "explore"
   | "artist"
-  | "album";
+  | "album"
+  | "shelf"
+  | "podcast";
 type RightPanel = null | "queue" | "library" | "related";
 type QueueTab = "upnext" | "lyrics";
 type DlState = "loading" | "done" | "error";
@@ -121,11 +125,14 @@ interface ViewSnapshot {
 
 function thumb(thumbnails?: api.Thumbnail[], size = 60): string {
   if (!thumbnails?.length) return "";
-  const url = [...thumbnails].sort(
+  let url = [...thumbnails].sort(
     (a, b) => Math.abs(a.width - size) - Math.abs(b.width - size),
   )[0].url;
   // Fix protocol-relative URLs (e.g. //yt3.ggpht.com/...) — browsers need a scheme
-  return url.startsWith("//") ? "https:" + url : url;
+  if (url.startsWith("//")) url = "https:" + url;
+  // Route googleusercontent/ggpht covers through the sidecar proxy+cache so a burst
+  // of album/playlist art can't get throttled by the CDN (i.ytimg passes through).
+  return api.thumbProxyUrl(url);
 }
 
 // Standard YouTube CDN thumbnail — works for ANY video ID, never expires.
@@ -134,34 +141,20 @@ function ytFallback(videoId?: string): string {
   return videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : "";
 }
 
-// Robust image-error recovery, applied in order:
-//   1) if the item has a videoId, swap to the YouTube CDN fallback once;
-//   2) retry the current URL a few times with exponential backoff and a cache-busting
-//      query — the usual cause of a "missing" thumbnail is transient googleusercontent
-//      throttling (HTTP 429) when ~30 covers burst-load at once, and a moment-later
-//      retry almost always succeeds (verified: the CDN ignores the ?r= param);
-//   3) only after retries are exhausted, hide so the styled ♫ placeholder shows.
-// State lives in data-attributes so reused <img> elements don't loop forever.
-function thumbOnError(videoId?: string, maxRetries = 4) {
+// Image-error recovery:
+//   1) if the item has a videoId, swap once to the rock-solid i.ytimg.com cover
+//      (direct, NOT proxied — keeps the fallback independent of the sidecar);
+//   2) otherwise hide so the styled ♫ placeholder shows.
+// googleusercontent/ggpht covers are served via the sidecar /thumb proxy, which
+// already fetches-once + caches + retries server-side, so the old client-side
+// retry-with-cache-buster loop is no longer needed. State lives in a data-attribute
+// so reused <img> elements don't loop.
+function thumbOnError(videoId?: string) {
   return (e: React.SyntheticEvent<HTMLImageElement>) => {
     const img = e.currentTarget;
     if (videoId && img.dataset.fellback !== "1") {
       img.dataset.fellback = "1";
-      img.dataset.base = ytFallback(videoId);
       img.src = ytFallback(videoId);
-      return;
-    }
-    const n = Number(img.dataset.retry || "0");
-    if (n < maxRetries) {
-      img.dataset.retry = String(n + 1);
-      const base = img.dataset.base || img.src.split("?")[0];
-      img.dataset.base = base;
-      window.setTimeout(
-        () => {
-          img.src = `${base}?r=${n + 1}`;
-        },
-        300 * 2 ** n,
-      );
       return;
     }
     img.style.display = "none";
@@ -216,6 +209,28 @@ function SearchIcon({
         stroke={color}
         strokeWidth="2"
         strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      style={{ display: "block", flexShrink: 0 }}
+    >
+      <circle cx="10" cy="10" r="7.75" stroke="currentColor" strokeWidth="2" />
+      <polyline
+        points="10,5.5 10,10.5 13.5,13"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
     </svg>
   );
@@ -293,8 +308,22 @@ function MoonIcon() {
 function MiniPlayerIcon() {
   // Picture-in-picture style glyph: outer frame + a small inset panel.
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ display: "block" }}>
-      <rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" strokeWidth="2" />
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      style={{ display: "block" }}
+    >
+      <rect
+        x="3"
+        y="4"
+        width="18"
+        height="16"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
       <rect x="12" y="12" width="7" height="6" rx="1" fill="currentColor" />
     </svg>
   );
@@ -564,11 +593,26 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // ── Home shelf page ────────────────────────────────────────────────────────
+  const [openShelf, setOpenShelf] = useState<HomeShelf | null>(null);
+  const homeScrollRef = useRef(0);
+  const homePageRef = useRef<HTMLDivElement>(null);
+  // True once the personalized (signed-in) home has loaded on startup, so the
+  // initial guest fetch can't clobber it if it resolves late.
+  const personalizedHomeRef = useRef(false);
+
   // ── Search ─────────────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [searchHistory, setSearchHistory] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  });
 
   // ── Content ─────────────────────────────────────────────────────────────────
   const [homeShelves, setHomeShelves] = useState<HomeShelf[]>([]);
@@ -583,24 +627,39 @@ export default function App() {
   const [artistQuery, setArtistQuery] = useState("");
   const [albumQuery, setAlbumQuery] = useState("");
 
-  // ── Artist / album detail pages ──────────────────────────────────────────────
+  // ── Artist / album / podcast detail pages ────────────────────────────────────
   const [openArtist, setOpenArtist] = useState<api.ArtistData | null>(null);
   const [openAlbum, setOpenAlbum] = useState<api.AlbumData | null>(null);
+  const [openPodcast, setOpenPodcast] = useState<api.PodcastDetail | null>(null);
+
+  // ── Podcasts browse page ─────────────────────────────────────────────────────
+  const [podcastShelves, setPodcastShelves] = useState<HomeShelf[]>([]);
+  const [podcastsLoading, setPodcastsLoading] = useState(false);
+  const podcastsPageRef = useRef<HTMLDivElement>(null);
+  const podcastsScrollRef = useRef(0);
 
   // ── Unified navigation history ───────────────────────────────────────────────
   // ONE back stack of restorable page snapshots — the only correct way to make
-  // back navigation loop properly when artist⇄album pages are interleaved (a
-  // browser/YouTube-Music style history). `navStackRef` holds the pages BEHIND
-  // the current one; `rootViewRef` is the list/root view to return to once the
-  // stack empties. Refs (not state) so push/pop read current values synchronously.
+  // back navigation loop properly when artist⇄album⇄podcast⇄shelf pages are
+  // interleaved (a browser/YouTube-Music style history). `navStackRef` holds the
+  // pages BEHIND the current one; `rootViewRef` is the list/root view to return to
+  // once the stack empties. Refs (not state) so push/pop read current values
+  // synchronously. Each snapshot's `kind` equals the view name it restores.
   type NavSnapshot =
     | { kind: "artist"; data: api.ArtistData }
-    | { kind: "album"; data: api.AlbumData };
+    | { kind: "album"; data: api.AlbumData }
+    | { kind: "podcast"; data: api.PodcastDetail }
+    | { kind: "shelf"; data: HomeShelf };
   const navStackRef = useRef<NavSnapshot[]>([]);
   const rootViewRef = useRef<View>("home");
   const openArtistRef = useRef<api.ArtistData | null>(null);
   const openAlbumRef = useRef<api.AlbumData | null>(null);
+  const openPodcastRef = useRef<api.PodcastDetail | null>(null);
+  const openShelfRef = useRef<HomeShelf | null>(null);
   const viewRef = useRef<View>("home");
+  // The view a search was launched from (e.g. Explore via a genre tile), so the
+  // search results page can offer a "← Back" that returns there.
+  const searchOriginRef = useRef<View>("home");
 
   // ── User profile ───────────────────────────────────────────────────────────
   const [userProfile, setUserProfile] = useState<{
@@ -623,6 +682,18 @@ export default function App() {
   const [ytmConnectOpen, setYtmConnectOpen] = useState(false);
   const [ytmBusy, setYtmBusy] = useState(false);
   const [ytmConnected, setYtmConnected] = useState(false);
+  // Feedback / bug-report modal.
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackType, setFeedbackType] =
+    useState<api.FeedbackInput["type"]>("bug");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [feedbackEmail, setFeedbackEmail] = useState("");
+  const [feedbackIncludeDiag, setFeedbackIncludeDiag] = useState(true);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+  // Rolling buffer of recent in-app errors/warnings — attached to a bug report
+  // only when the user opts in. Capped so it never grows unbounded.
+  const diagLogRef = useRef<string[]>([]);
   // Which playlists the user chose to sync (null = not chosen yet for this account).
   const [syncedIds, setSyncedIds] = useState<string[] | null>(null);
   const [showPlaylistChooser, setShowPlaylistChooser] = useState(false);
@@ -646,7 +717,10 @@ export default function App() {
     playing: false,
     currentTime: 0,
     duration: 0,
-    volume: 0.8,
+    volume: (() => {
+      const v = parseFloat(localStorage.getItem("yt-music-volume") || "0.8");
+      return isNaN(v) ? 0.8 : Math.max(0, Math.min(1, v));
+    })(),
   });
 
   // ── Player accent colour (extracted from album art) ───────────────────────
@@ -764,6 +838,12 @@ export default function App() {
     openAlbumRef.current = openAlbum;
   }, [openAlbum]);
   useEffect(() => {
+    openPodcastRef.current = openPodcast;
+  }, [openPodcast]);
+  useEffect(() => {
+    openShelfRef.current = openShelf;
+  }, [openShelf]);
+  useEffect(() => {
     viewRef.current = view;
   }, [view]);
 
@@ -805,23 +885,86 @@ export default function App() {
     void checkForUpdates();
   }, []);
 
+  // Capture recent errors/warnings into a rolling buffer for opt-in bug reports.
+  // We wrap console.error/warn and listen for uncaught errors; nothing is sent
+  // anywhere unless the user ticks "include diagnostics" in the feedback form.
+  useEffect(() => {
+    const push = (level: string, args: unknown[]) => {
+      const line = `${new Date().toISOString()} [${level}] ${args
+        .map((a) =>
+          a instanceof Error ? `${a.name}: ${a.message}` : String(a),
+        )
+        .join(" ")}`.slice(0, 500);
+      const buf = diagLogRef.current;
+      buf.push(line);
+      if (buf.length > 40) buf.shift();
+    };
+    const origError = console.error;
+    const origWarn = console.warn;
+    console.error = (...args: unknown[]) => {
+      push("error", args);
+      origError(...args);
+    };
+    console.warn = (...args: unknown[]) => {
+      push("warn", args);
+      origWarn(...args);
+    };
+    const onError = (e: ErrorEvent) => push("uncaught", [e.message]);
+    const onRej = (e: PromiseRejectionEvent) => push("unhandled", [e.reason]);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRej);
+    return () => {
+      console.error = origError;
+      console.warn = origWarn;
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRej);
+    };
+  }, []);
+
   useEffect(() => {
     if (!sidecarReady) return;
+    // Initial/guest home — but never overwrite the personalized feed if it has
+    // already loaded (this fetch can resolve late and clobber it otherwise).
     api
       .getHome()
-      .then(({ shelves }) => setHomeShelves(shelves))
+      .then(({ shelves }) => {
+        if (!personalizedHomeRef.current && shelves?.length)
+          setHomeShelves(shelves);
+      })
       .catch(() => {});
     // Cap state for the sign-in UI (fails open — never blocks a returning user).
     api
       .getSignupsOpen()
       .then((r) => setSignupsOpen(r.open))
       .catch(() => setSignupsOpen(true));
-    // Silently re-push a stored YT Music session cookie; if it restores, reload the
-    // home as the personalized feed.
-    api.ytmRestore().then((connected) => {
-      setYtmConnected(connected);
-      if (connected) api.getHome().then(({ shelves }) => setHomeShelves(shelves)).catch(() => {});
-    }).catch(() => {});
+    // Silently re-push a stored YT Music session cookie; if it restores, load the
+    // personalized feed — RETRYING through the cold-boot window. After the machine
+    // has been off, the network/InnerTube often isn't ready for the first second or
+    // two; the old one-shot fetch would fail silently and leave you on the guest
+    // feed. We retry with backoff and stop on the first success.
+    api
+      .ytmRestore()
+      .then((connected) => {
+        setYtmConnected(connected);
+        if (!connected) return;
+        void (async () => {
+          const delays = [0, 1500, 3000, 6000, 12000];
+          for (const d of delays) {
+            if (d) await new Promise((r) => setTimeout(r, d));
+            try {
+              const { shelves } = await api.getHome();
+              if (shelves?.length) {
+                personalizedHomeRef.current = true;
+                setHomeShelves(shelves);
+                return;
+              }
+            } catch {
+              /* network not ready yet — retry */
+            }
+          }
+        })();
+      })
+      .catch(() => {});
   }, [sidecarReady]);
 
   // When the YT Music cookie restores on startup (ytmConnected flips to true) and
@@ -831,9 +974,15 @@ export default function App() {
     if (!ytmConnected) return;
     const v = viewRef.current;
     if (v === "artists") {
-      api.getLibraryArtists().then((r) => setArtistResults(r.artists ?? [])).catch(() => {});
+      api
+        .getLibraryArtists()
+        .then((r) => setArtistResults(r.artists ?? []))
+        .catch(() => {});
     } else if (v === "albums") {
-      api.getLibraryAlbums().then((r) => setAlbumResults(r.albums ?? [])).catch(() => {});
+      api
+        .getLibraryAlbums()
+        .then((r) => setAlbumResults(r.albums ?? []))
+        .catch(() => {});
     }
   }, [ytmConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -927,12 +1076,20 @@ export default function App() {
     }
     setLyrics(null);
     setLyricsLoading(true);
-    fetchLyricsCached(player.track)
-      .then((d) => {
-        if (d) setLyrics(d);
-        else setLyrics(null);
-      })
-      .finally(() => setLyricsLoading(false));
+    // Delay 300 ms so the /stream request reaches the sidecar first.
+    // The sidecar's lyrics endpoint runs in a thread pool (sync def), so
+    // even concurrent requests don't block each other — but giving stream
+    // a small head start lets yt-dlp begin before any lyrics work starts.
+    const track = player.track;
+    const t = setTimeout(() => {
+      fetchLyricsCached(track)
+        .then((d) => {
+          if (d) setLyrics(d);
+          else setLyrics(null);
+        })
+        .finally(() => setLyricsLoading(false));
+    }, 300);
+    return () => clearTimeout(t);
   }, [player.track?.videoId, fetchLyricsCached]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Fetch related when panel opens or track changes ───────────────────────
@@ -1201,7 +1358,7 @@ export default function App() {
     const items = homeShelves
       .flatMap((s) => s.contents ?? [])
       .filter((r) => r.videoId)
-      .slice(0, 2);
+      .slice(0, 5);
     const tid = setTimeout(
       () =>
         items.forEach((it) =>
@@ -1305,12 +1462,16 @@ export default function App() {
       if (next) {
         await win.setMinSize(new LogicalSize(220, 300));
         const saved = (() => {
-          try { return JSON.parse(localStorage.getItem("widgetSize") || "null"); } catch { return null; }
+          try {
+            return JSON.parse(localStorage.getItem("widgetSize") || "null");
+          } catch {
+            return null;
+          }
         })();
         await win.setSize(
           saved?.w && saved?.h
-            ? new PhysicalSize(saved.w, saved.h)   // your remembered widget size
-            : new LogicalSize(300, 480)            // first-time default
+            ? new PhysicalSize(saved.w, saved.h) // your remembered widget size
+            : new LogicalSize(300, 480), // first-time default
         );
         await win.setAlwaysOnTop(true);
         await win.setDecorations(false);
@@ -1337,19 +1498,33 @@ export default function App() {
         unlisten = await getCurrentWindow().onResized(({ payload }) => {
           // Persist only plausible widget sizes (physical px); the < 900 guard ignores
           // the resize back to the full 1100px window when leaving widget mode.
-          if (payload.width > 100 && payload.height > 100 && payload.width < 900) {
-            localStorage.setItem("widgetSize", JSON.stringify({ w: payload.width, h: payload.height }));
+          if (
+            payload.width > 100 &&
+            payload.height > 100 &&
+            payload.width < 900
+          ) {
+            localStorage.setItem(
+              "widgetSize",
+              JSON.stringify({ w: payload.width, h: payload.height }),
+            );
           }
         });
-      } catch { /* not in Tauri */ }
+      } catch {
+        /* not in Tauri */
+      }
     })();
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, [miniMode]);
 
   const setVol = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = Number(e.target.value);
     if (audioRef.current) audioRef.current.volume = v;
     setPlayer((p) => ({ ...p, volume: v }));
+    try {
+      localStorage.setItem("yt-music-volume", String(v));
+    } catch {}
   };
 
   // ── Right panel toggle ─────────────────────────────────────────────────────
@@ -1360,28 +1535,82 @@ export default function App() {
 
   // ── Search ─────────────────────────────────────────────────────────────────
 
-  const doSearch = useCallback(async (q: string) => {
-    if (!q.trim()) return;
-    setView("search");
-    setShowSuggestions(false);
-    setSuggestions([]);
-    setLoading(true);
-    setError(null);
-    try {
-      const { results } = await api.search(q, "songs");
-      setSearchResults(results);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
+  const addToSearchHistory = useCallback((q: string) => {
+    const trimmed = q.trim();
+    if (!trimmed) return;
+    setSearchHistory((prev) => {
+      const deduped = prev.filter(
+        (h) => h.toLowerCase() !== trimmed.toLowerCase(),
+      );
+      const next = [trimmed, ...deduped].slice(0, SEARCH_HISTORY_MAX);
+      try {
+        localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
   }, []);
+
+  const removeFromSearchHistory = useCallback((q: string) => {
+    setSearchHistory((prev) => {
+      const next = prev.filter((h) => h !== q);
+      try {
+        localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const clearSearchHistory = useCallback(() => {
+    setSearchHistory([]);
+    try {
+      localStorage.removeItem(SEARCH_HISTORY_KEY);
+    } catch {}
+  }, []);
+
+  const doSearch = useCallback(
+    async (q: string) => {
+      if (!q.trim()) return;
+      // Remember where the search came from (Explore, Home, …) so the results page
+      // can go back there. Don't overwrite it when refining an existing search.
+      if (viewRef.current !== "search") searchOriginRef.current = viewRef.current;
+      addToSearchHistory(q);
+      setView("search");
+      setShowSuggestions(false);
+      setSuggestions([]);
+      setLoading(true);
+      setError(null);
+      try {
+        const { results } = await api.search(q, "songs");
+        setSearchResults(results);
+        // Warm the top 5 stream URLs in the background — by the time the user
+        // picks a song the yt-dlp round-trip is already done and play is instant.
+        setTimeout(() => {
+          results
+            .slice(0, 5)
+            .filter((r) => r.videoId)
+            .forEach((r) =>
+              prefetchStream(
+                r.videoId!,
+                false,
+                r.title,
+                r.artists?.[0]?.name ?? "",
+              ),
+            );
+        }, 50);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [prefetchStream, addToSearchHistory],
+  ); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSearchInput = useCallback((value: string) => {
     setSearchQuery(value);
     setShowSuggestions(true);
     if (suggestTimer.current) clearTimeout(suggestTimer.current);
-    if (value.trim().length < 2) {
+    if (value.trim().length < 1) {
       setSuggestions([]);
       return;
     }
@@ -1428,14 +1657,20 @@ export default function App() {
   const openArtists = useCallback(() => {
     setView("artists");
     if (ytmConnected) {
-      api.getLibraryArtists().then((r) => setArtistResults(r.artists ?? [])).catch(() => {});
+      api
+        .getLibraryArtists()
+        .then((r) => setArtistResults(r.artists ?? []))
+        .catch(() => {});
     }
   }, [ytmConnected]);
 
   const openAlbums = useCallback(() => {
     setView("albums");
     if (ytmConnected) {
-      api.getLibraryAlbums().then((r) => setAlbumResults(r.albums ?? [])).catch(() => {});
+      api
+        .getLibraryAlbums()
+        .then((r) => setAlbumResults(r.albums ?? []))
+        .catch(() => {});
     }
   }, [ytmConnected]);
 
@@ -1536,7 +1771,19 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      setOpenPlaylist(await api.getPlaylist(id));
+      const playlist = await api.getPlaylist(id);
+      setOpenPlaylist(playlist);
+      setTimeout(() => {
+        playlist.tracks.slice(0, 5).forEach((t) => {
+          if (t.videoId)
+            prefetchStream(
+              t.videoId,
+              false,
+              t.title,
+              t.artists?.[0]?.name ?? "",
+            );
+        });
+      }, 50);
     } catch (e) {
       setError(`Failed to load playlist: ${e}`);
       setView(rootViewRef.current);
@@ -1557,6 +1804,17 @@ export default function App() {
     try {
       const { tracks } = await api.getYtPlaylist(id);
       setOpenPlaylist({ id, title, tracks, thumbnails: [] });
+      setTimeout(() => {
+        tracks.slice(0, 5).forEach((t) => {
+          if (t.videoId)
+            prefetchStream(
+              t.videoId,
+              false,
+              t.title,
+              t.artists?.[0]?.name ?? "",
+            );
+        });
+      }, 50);
     } catch (e) {
       setError(`Failed to load playlist: ${e}`);
       setView(rootViewRef.current);
@@ -1593,9 +1851,22 @@ export default function App() {
   const isAdded = (videoId?: string) => playlistsWith(videoId).length > 0;
 
   const doAddToPlaylist = async (pl: api.PlaylistSummary, track: Track) => {
+    // Optimistic update — reflect the change instantly, sync in background.
+    const tempId = `__pending_${Date.now()}__`;
+    setMembership((m) => ({
+      ...m,
+      [pl.playlistId]: { ...(m[pl.playlistId] || {}), [track.videoId]: tempId },
+    }));
+    setOpenPlaylist((p) =>
+      p && p.id === pl.playlistId
+        ? { ...p, tracks: [...p.tracks, { ...track, playlistItemId: tempId }] }
+        : p,
+    );
+    showNotice(`Added to ${pl.title}`);
     try {
       const res = await api.addToPlaylist(pl.playlistId, track.videoId);
-      const itemId = res.playlistItemId ?? "";
+      const itemId = res.playlistItemId ?? tempId;
+      // Replace temp ID with the real one YouTube returned.
       setMembership((m) => ({
         ...m,
         [pl.playlistId]: {
@@ -1603,16 +1874,33 @@ export default function App() {
           [track.videoId]: itemId,
         },
       }));
-      showNotice(`Added to ${pl.title}`);
       setOpenPlaylist((p) =>
         p && p.id === pl.playlistId
           ? {
               ...p,
-              tracks: [...p.tracks, { ...track, playlistItemId: itemId }],
+              tracks: p.tracks.map((t) =>
+                t.videoId === track.videoId
+                  ? { ...t, playlistItemId: itemId }
+                  : t,
+              ),
             }
           : p,
       );
     } catch {
+      // Revert the optimistic update.
+      setMembership((m) => {
+        const copy = { ...(m[pl.playlistId] || {}) };
+        delete copy[track.videoId];
+        return { ...m, [pl.playlistId]: copy };
+      });
+      setOpenPlaylist((p) =>
+        p && p.id === pl.playlistId
+          ? {
+              ...p,
+              tracks: p.tracks.filter((t) => t.videoId !== track.videoId),
+            }
+          : p,
+      );
       setError("Couldn't add the song to your playlist.");
     }
   };
@@ -1623,20 +1911,26 @@ export default function App() {
   ) => {
     const itemId = membership[pl.playlistId]?.[videoId];
     if (!itemId) return;
+    // Optimistic update — remove from UI instantly, sync in background.
+    setMembership((m) => {
+      const copy = { ...(m[pl.playlistId] || {}) };
+      delete copy[videoId];
+      return { ...m, [pl.playlistId]: copy };
+    });
+    setOpenPlaylist((p) =>
+      p && p.id === pl.playlistId
+        ? { ...p, tracks: p.tracks.filter((t) => t.videoId !== videoId) }
+        : p,
+    );
+    showNotice(`Removed from ${pl.title}`);
     try {
       await api.removeFromPlaylistItem(itemId);
-      setMembership((m) => {
-        const copy = { ...(m[pl.playlistId] || {}) };
-        delete copy[videoId];
-        return { ...m, [pl.playlistId]: copy };
-      });
-      showNotice(`Removed from ${pl.title}`);
-      setOpenPlaylist((p) =>
-        p && p.id === pl.playlistId
-          ? { ...p, tracks: p.tracks.filter((t) => t.videoId !== videoId) }
-          : p,
-      );
     } catch {
+      // Revert the optimistic update.
+      setMembership((m) => ({
+        ...m,
+        [pl.playlistId]: { ...(m[pl.playlistId] || {}), [videoId]: itemId },
+      }));
       setError("Couldn't remove the song.");
     }
   };
@@ -1675,24 +1969,21 @@ export default function App() {
   const removeTrack = async (track: Track) => {
     if (!track.playlistItemId || !openPlaylist) return;
     const pid = openPlaylist.id;
+    const itemId = track.playlistItemId;
+    // Optimistic update — remove from UI instantly, sync in background.
+    setMembership((m) => {
+      const c = { ...(m[pid] || {}) };
+      delete c[track.videoId];
+      return { ...m, [pid]: c };
+    });
+    setOpenPlaylist((p) =>
+      p
+        ? { ...p, tracks: p.tracks.filter((t) => t.playlistItemId !== itemId) }
+        : p,
+    );
+    showNotice("Removed from playlist");
     try {
-      await api.removeFromPlaylistItem(track.playlistItemId);
-      setMembership((m) => {
-        const c = { ...(m[pid] || {}) };
-        delete c[track.videoId];
-        return { ...m, [pid]: c };
-      });
-      showNotice("Removed from playlist");
-      setOpenPlaylist((p) =>
-        p
-          ? {
-              ...p,
-              tracks: p.tracks.filter(
-                (t) => t.playlistItemId !== track.playlistItemId,
-              ),
-            }
-          : p,
-      );
+      await api.removeFromPlaylistItem(itemId);
     } catch {
       setError("Couldn't remove the song.");
     }
@@ -1740,6 +2031,18 @@ export default function App() {
         ...navStackRef.current,
         { kind: "album", data: openAlbumRef.current },
       ];
+    } else if (v === "podcast" && openPodcastRef.current) {
+      navStackRef.current = [
+        ...navStackRef.current,
+        { kind: "podcast", data: openPodcastRef.current },
+      ];
+    } else if (v === "shelf" && openShelfRef.current) {
+      // A shelf page sits on the chain too (e.g. podcasts → "See all" shelf →
+      // open a show). rootViewRef was already set when the shelf was opened.
+      navStackRef.current = [
+        ...navStackRef.current,
+        { kind: "shelf", data: openShelfRef.current },
+      ];
     } else {
       rootViewRef.current = v;
       navStackRef.current = [];
@@ -1755,9 +2058,24 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        setOpenArtist(await api.getArtist(browseId));
+        const data = await api.getArtist(browseId);
+        // Guard: if the API returned an empty shell (no name, no sections),
+        // treat it as a failure so the user sees a useful message.
+        if (
+          !data.name &&
+          !data.songs?.results?.length &&
+          !data.albums?.results?.length
+        ) {
+          setError(
+            "Couldn't load this artist — they may not be on YouTube Music.",
+          );
+          setView(rootViewRef.current || "home");
+        } else {
+          setOpenArtist(data);
+        }
       } catch {
-        setError("Failed to load artist page.");
+        setError("Failed to load artist. Check your connection and try again.");
+        setView(rootViewRef.current || "home");
       } finally {
         setLoading(false);
       }
@@ -1774,9 +2092,16 @@ export default function App() {
       setLoading(true);
       setError(null);
       try {
-        setOpenAlbum(await api.getAlbum(browseId));
+        const data = await api.getAlbum(browseId);
+        if (!data.title && !data.tracks?.length) {
+          setError("Couldn't load this album — it may no longer be available.");
+          setView(rootViewRef.current || "home");
+        } else {
+          setOpenAlbum(data);
+        }
       } catch {
-        setError("Failed to load album.");
+        setError("Failed to load album. Check your connection and try again.");
+        setView(rootViewRef.current || "home");
       } finally {
         setLoading(false);
       }
@@ -1786,28 +2111,109 @@ export default function App() {
 
   // Single back handler for every detail page. Pop the previous snapshot and
   // restore it (instant — no re-fetch); when the stack is empty, return to the
-  // root/list view we came from. This never lands on a detail view with null
-  // data, so the black-screen-after-N-backs class of bug cannot recur.
+  // root/list view we came from. Each snapshot's `kind` is also its view name, so
+  // restoring is uniform — and we never land on a detail view with null data, so
+  // the black-screen-after-N-backs class of bug cannot recur.
   const goBack = useCallback(() => {
     const stack = navStackRef.current;
     if (stack.length > 0) {
       const prev = stack[stack.length - 1];
       navStackRef.current = stack.slice(0, -1);
-      if (prev.kind === "artist") {
-        setOpenArtist(prev.data);
-        setOpenAlbum(null);
-        setView("artist");
-      } else {
-        setOpenAlbum(prev.data);
-        setOpenArtist(null);
-        setView("album");
-      }
+      setOpenArtist(prev.kind === "artist" ? prev.data : null);
+      setOpenAlbum(prev.kind === "album" ? prev.data : null);
+      setOpenPodcast(prev.kind === "podcast" ? prev.data : null);
+      setOpenShelf(prev.kind === "shelf" ? prev.data : null);
+      setView(prev.kind);
     } else {
       setOpenArtist(null);
       setOpenAlbum(null);
+      setOpenPodcast(null);
+      setOpenShelf(null);
       setView(rootViewRef.current);
     }
   }, []);
+
+  // Open a shelf's full contents in a dedicated page. `root` is the list view it
+  // returns to (home or podcasts) — its scroll is saved so Back restores position.
+  const openShelfPage = useCallback((shelf: HomeShelf, root: View = "home") => {
+    if (root === "home") {
+      homeScrollRef.current = homePageRef.current?.scrollTop ?? 0;
+    }
+    // (the podcasts page tracks its scroll continuously via onScroll)
+    rootViewRef.current = root;
+    navStackRef.current = [];
+    setOpenShelf(shelf);
+    setView("shelf");
+  }, []);
+
+  const loadPodcast = useCallback(
+    async (browseId: string) => {
+      pushCurrentPage();
+      setView("podcast");
+      setOpenPodcast(null);
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.getPodcast(browseId);
+        if (!data.title && !data.episodes?.length) {
+          setError("Couldn't load this podcast — it may no longer be available.");
+          setView(rootViewRef.current || "podcasts");
+        } else {
+          setOpenPodcast(data);
+        }
+      } catch {
+        setError("Failed to load podcast. Check your connection and try again.");
+        setView(rootViewRef.current || "podcasts");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [pushCurrentPage],
+  );
+
+  // Restore scroll position when returning to a list view from a sub-page.
+  useEffect(() => {
+    if (view === "home" && homePageRef.current) {
+      homePageRef.current.scrollTop = homeScrollRef.current;
+    } else if (view === "podcasts" && podcastsPageRef.current) {
+      podcastsPageRef.current.scrollTop = podcastsScrollRef.current;
+    }
+  }, [view]);
+
+  // Open the Podcasts page; fetch the topic shelves once (cached in state and
+  // disk-cached server-side, so re-opening is instant).
+  const loadPodcasts = useCallback(() => {
+    setView("podcasts");
+    if (podcastShelves.length > 0 || podcastsLoading) return;
+    setPodcastsLoading(true);
+    setError(null);
+    api
+      .getPodcastBrowse()
+      .then(({ shelves }) => setPodcastShelves(shelves))
+      .catch(() =>
+        setError("Couldn't load podcasts. Check your connection and try again."),
+      )
+      .finally(() => setPodcastsLoading(false));
+  }, [podcastShelves.length, podcastsLoading]);
+
+  // Play a podcast episode through the normal player (episodes carry a videoId).
+  const playEpisode = useCallback(
+    (ep: api.Episode, podcast?: api.PodcastDetail | null) => {
+      const authorName = podcast
+        ? typeof podcast.author === "string"
+          ? podcast.author
+          : podcast.author?.name
+        : undefined;
+      playTrack({
+        videoId: ep.videoId,
+        title: ep.title,
+        thumbnails: ep.thumbnails,
+        artists: authorName ? [{ name: authorName }] : undefined,
+        duration: ep.duration,
+      });
+    },
+    [playTrack],
+  );
 
   // ── Auth ───────────────────────────────────────────────────────────────────
 
@@ -1904,13 +2310,67 @@ export default function App() {
     }
   };
 
+  // ── Feedback / bug report ────────────────────────────────────────────────────
+  const openFeedback = () => {
+    setSettingsOpen(false);
+    setFeedbackType("bug");
+    setFeedbackMessage("");
+    setFeedbackEmail(userProfile?.email ?? "");
+    setFeedbackIncludeDiag(true);
+    setFeedbackDone(false);
+    setFeedbackOpen(true);
+  };
+
+  const submitFeedbackForm = async () => {
+    const message = feedbackMessage.trim();
+    if (!message) return;
+    setFeedbackBusy(true);
+    try {
+      // App version (Tauri only; undefined in the plain dev browser).
+      let appVersion: string | undefined;
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        appVersion = await getVersion();
+      } catch {
+        /* not running inside Tauri */
+      }
+      const diagnostics = feedbackIncludeDiag
+        ? {
+            view,
+            authenticated,
+            ytmConnected,
+            trackId: player.track?.videoId ?? null,
+            playing: player.playing,
+            screen: `${window.innerWidth}x${window.innerHeight}`,
+            userAgent: navigator.userAgent,
+            recentLogs: diagLogRef.current.slice(-40),
+            capturedAt: new Date().toISOString(),
+          }
+        : undefined;
+      await api.submitFeedback({
+        type: feedbackType,
+        message,
+        email: feedbackEmail.trim() || undefined,
+        app_version: appVersion,
+        diagnostics,
+      });
+      setFeedbackDone(true);
+      showNotice("Thanks — your feedback was sent ✓");
+      setTimeout(() => setFeedbackOpen(false), 1200);
+    } catch {
+      setError("Couldn't send your feedback. Check your connection and try again.");
+    } finally {
+      setFeedbackBusy(false);
+    }
+  };
+
   // ── YouTube Music session-cookie connect ─────────────────────────────────────
   const connectYtMusic = async () => {
     setSettingsOpen(false);
     setError(null);
     try {
-      await api.ytmConnectBegin();   // opens the in-app login window
-      setYtmConnectOpen(true);       // show the "I've signed in" prompt
+      await api.ytmConnectBegin(); // opens the in-app login window
+      setYtmConnectOpen(true); // show the "I've signed in" prompt
     } catch (e) {
       setError(`Couldn't open the YouTube Music login: ${e}`);
     }
@@ -1923,7 +2383,9 @@ export default function App() {
       // Step 1: read the cookie + install it in the sidecar (fast — returns immediately).
       const r = await api.ytmConnectFinish();
       if (!r.ok) {
-        setError(`Couldn't read your session: ${r.error ?? "no session found"}`);
+        setError(
+          `Couldn't read your session: ${r.error ?? "no session found"}`,
+        );
         return;
       }
       // Step 2: verify it actually unlocks InnerTube (one authenticated call).
@@ -1931,11 +2393,18 @@ export default function App() {
       if (t.ok) {
         setYtmConnected(true);
         setYtmConnectOpen(false);
-        showNotice(`Connected to YouTube Music ✓${t.playlistCount != null ? ` — ${t.playlistCount} library playlist(s)` : ""}`);
+        showNotice(
+          `Connected to YouTube Music ✓${t.playlistCount != null ? ` — ${t.playlistCount} library playlist(s)` : ""}`,
+        );
         // Refresh the home to your personalized feed now that InnerTube is unlocked.
-        api.getHome().then(({ shelves }) => setHomeShelves(shelves)).catch(() => {});
+        api
+          .getHome()
+          .then(({ shelves }) => setHomeShelves(shelves))
+          .catch(() => {});
       } else {
-        setError(`Session installed but YouTube rejected it: ${t.error ?? "unknown error"}`);
+        setError(
+          `Session installed but YouTube rejected it: ${t.error ?? "unknown error"}`,
+        );
       }
     } catch (e) {
       setError(`Connect failed: ${e}`);
@@ -1950,6 +2419,16 @@ export default function App() {
       await api.ytmDisconnect();
       setYtmConnected(false);
       showNotice("Disconnected from YouTube Music.");
+      // Revert the home to the guest/public feed (the cookie is now cleared, so
+      // the sidecar serves the anonymous feed again).
+      api
+        .getHome()
+        .then(({ shelves }) => setHomeShelves(shelves))
+        .catch(() => {});
+      // Drop the personal library that was loaded into the Artists/Albums grids —
+      // without the cookie those views are search-only, so they revert to empty.
+      setArtistResults([]);
+      setAlbumResults([]);
     } catch (e) {
       setError(`Couldn't disconnect: ${e}`);
     }
@@ -2059,7 +2538,9 @@ export default function App() {
     "app",
     panelOpen ? "panel-open" : showStrip ? "has-strip" : "",
     miniMode ? "mini-mode" : "",
-  ].filter(Boolean).join(" ");
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   // Parsed once per lyrics change — not on every render. Avoids the regex
   // scan running 60×/sec during karaoke playback.
@@ -2224,24 +2705,123 @@ export default function App() {
 
       {/* YouTube Music connect: prompt to finish after the user signs into the login window */}
       {ytmConnectOpen && (
-        <div className="chooser-overlay" onClick={() => !ytmBusy && setYtmConnectOpen(false)}>
+        <div
+          className="chooser-overlay"
+          onClick={() => !ytmBusy && setYtmConnectOpen(false)}
+        >
           <div className="chooser-card" onClick={(e) => e.stopPropagation()}>
             <div className="chooser-title">Connect YouTube Music</div>
             <p className="notice-body">
-              A YouTube Music window opened — <strong>sign in there</strong>. Once you're
-              signed in and see your YT Music home, click below and we'll connect your
-              session to unlock your personalized home, library artists/albums, real liked
-              songs and history.
+              A YouTube Music window opened - <strong>sign in there</strong>.
+              Once you're signed in and see your YT Music home, click below and
+              we'll connect your session to unlock your personalized home,
+              library artists/albums, real liked songs and history.
             </p>
             <p className="notice-policy">
-              Your session cookie stays on this device (OS keychain) — never sent to our server.
+              Your session cookie stays on this device (OS keychain), never sent
+              to our server.
             </p>
             <div className="chooser-actions">
-              <button className="btn-ghost" disabled={ytmBusy} onClick={() => setYtmConnectOpen(false)}>Cancel</button>
-              <button className="btn-primary" disabled={ytmBusy} onClick={finishYtMusic}>
+              <button
+                className="btn-ghost"
+                disabled={ytmBusy}
+                onClick={() => setYtmConnectOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                disabled={ytmBusy}
+                onClick={finishYtMusic}
+              >
                 {ytmBusy ? "Connecting…" : "I've signed in"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback / bug report */}
+      {feedbackOpen && (
+        <div
+          className="chooser-overlay"
+          onClick={() => !feedbackBusy && setFeedbackOpen(false)}
+        >
+          <div
+            className="chooser-card feedback-card"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="chooser-title">Send feedback</div>
+            {feedbackDone ? (
+              <p className="notice-body">Thanks — your feedback was sent. ✓</p>
+            ) : (
+              <>
+                <div className="feedback-types">
+                  {(
+                    [
+                      ["bug", "🐞 Bug"],
+                      ["feedback", "💬 Feedback"],
+                      ["feature", "✨ Feature"],
+                      ["complaint", "⚠️ Complaint"],
+                    ] as [api.FeedbackInput["type"], string][]
+                  ).map(([t, label]) => (
+                    <button
+                      key={t}
+                      className={`feedback-type-chip ${feedbackType === t ? "active" : ""}`}
+                      onClick={() => setFeedbackType(t)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  className="feedback-textarea"
+                  placeholder={
+                    feedbackType === "bug"
+                      ? "What went wrong? Steps to reproduce help a lot."
+                      : "Tell us what's on your mind…"
+                  }
+                  value={feedbackMessage}
+                  maxLength={5000}
+                  onChange={(e) => setFeedbackMessage(e.target.value)}
+                  autoFocus
+                />
+                <input
+                  className="feedback-email"
+                  type="email"
+                  placeholder="Email (optional — for a reply)"
+                  value={feedbackEmail}
+                  onChange={(e) => setFeedbackEmail(e.target.value)}
+                />
+                <label className="feedback-diag">
+                  <input
+                    type="checkbox"
+                    checked={feedbackIncludeDiag}
+                    onChange={(e) => setFeedbackIncludeDiag(e.target.checked)}
+                  />
+                  <span>
+                    Include diagnostics (app version, OS, recent errors). No
+                    personal data or your YT Music session.
+                  </span>
+                </label>
+                <div className="chooser-actions">
+                  <button
+                    className="btn-ghost"
+                    disabled={feedbackBusy}
+                    onClick={() => setFeedbackOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="btn-primary"
+                    disabled={feedbackBusy || !feedbackMessage.trim()}
+                    onClick={submitFeedbackForm}
+                  >
+                    {feedbackBusy ? "Sending…" : "Send"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2422,9 +3002,13 @@ export default function App() {
                         <div className="settings-menu">
                           <button
                             className="settings-item"
-                            onClick={ytmConnected ? disconnectYtMusic : connectYtMusic}
+                            onClick={
+                              ytmConnected ? disconnectYtMusic : connectYtMusic
+                            }
                           >
-                            {ytmConnected ? "Disconnect YouTube Music" : "Connect YouTube Music"}
+                            {ytmConnected
+                              ? "Disconnect YouTube Music"
+                              : "Connect YouTube Music"}
                           </button>
                           <button
                             className="settings-item"
@@ -2446,6 +3030,9 @@ export default function App() {
                             }}
                           >
                             Privacy Policy
+                          </button>
+                          <button className="settings-item" onClick={openFeedback}>
+                            Send feedback
                           </button>
                           <button
                             className="settings-item settings-item-danger"
@@ -2486,6 +3073,9 @@ export default function App() {
                     still sign in.
                   </div>
                 )}
+                <button className="guest-feedback-link" onClick={openFeedback}>
+                  Send feedback
+                </button>
               </div>
             )}
           </div>
@@ -2528,7 +3118,10 @@ export default function App() {
             >
               <span className="nav-icon">💿</span> Albums
             </button>
-            <button className="nav-item disabled">
+            <button
+              className={`nav-item ${view === "podcasts" || view === "podcast" ? "active" : ""}`}
+              onClick={loadPodcasts}
+            >
               <span className="nav-icon">🎙️</span> Podcasts
             </button>
           </nav>
@@ -2570,15 +3163,29 @@ export default function App() {
                     title="Minimize"
                     onClick={async () => {
                       try {
-                        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+                        const { getCurrentWindow } =
+                          await import("@tauri-apps/api/window");
                         await getCurrentWindow().minimize();
-                      } catch { /* not in Tauri */ }
+                      } catch {
+                        /* not in Tauri */
+                      }
                     }}
-                  >‒</button>
-                  <button className="mini-win-btn" title="Back to full app" onClick={toggleMiniMode}>⤢</button>
+                  >
+                    ‒
+                  </button>
+                  <button
+                    className="mini-win-btn"
+                    title="Back to full app"
+                    onClick={toggleMiniMode}
+                  >
+                    ⤢
+                  </button>
                 </div>
               )}
-              <div className="left-player-art" data-tauri-drag-region={miniMode ? "" : undefined}>
+              <div
+                className="left-player-art"
+                data-tauri-drag-region={miniMode ? "" : undefined}
+              >
                 <img
                   key={
                     thumb(player.track.thumbnails, 160) ||
@@ -2595,7 +3202,10 @@ export default function App() {
                   onError={thumbOnError(player.track.videoId)}
                 />
               </div>
-              <div className="left-player-info" data-tauri-drag-region={miniMode ? "" : undefined}>
+              <div
+                className="left-player-info"
+                data-tauri-drag-region={miniMode ? "" : undefined}
+              >
                 <span className="left-player-title">{player.track.title}</span>
                 <span className="left-player-artist">
                   {player.track.artists?.map((a, i) => (
@@ -2713,7 +3323,9 @@ export default function App() {
                   <input
                     type="range"
                     className="volume-slider"
-                    style={{ background: sliderFill(volumePct, "var(--text2)") }}
+                    style={{
+                      background: sliderFill(volumePct, "var(--text2)"),
+                    }}
                     min={0}
                     max={1}
                     step={0.01}
@@ -2750,29 +3362,91 @@ export default function App() {
               value={searchQuery}
               autoComplete="off"
               onChange={(e) => handleSearchInput(e.target.value)}
-              onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
-              onBlur={() => setShowSuggestions(false)}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
             />
-            {showSuggestions && suggestions.length > 0 && (
-              <div className="suggestions-dropdown">
-                {suggestions.map((s, i) => (
-                  <div
-                    key={i}
-                    className="suggestion-item"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => {
-                      setSearchQuery(s);
-                      doSearch(s);
-                    }}
-                  >
-                    <span className="suggest-icon">
-                      <SearchIcon size={13} color="var(--text3)" />
-                    </span>
-                    {s}
-                  </div>
-                ))}
-              </div>
-            )}
+            {(() => {
+              const q = searchQuery.trim().toLowerCase();
+              const matchingHistory = q
+                ? searchHistory
+                    .filter((h) => h.toLowerCase().includes(q))
+                    .slice(0, 5)
+                : searchHistory.slice(0, 8);
+              const hasContent =
+                matchingHistory.length > 0 || suggestions.length > 0;
+              if (!showSuggestions || !hasContent) return null;
+              return (
+                <div className="suggestions-dropdown">
+                  {matchingHistory.length > 0 && (
+                    <>
+                      <div className="suggest-section-header">
+                        <span>Recent searches</span>
+                        <button
+                          className="suggest-clear-all"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={clearSearchHistory}
+                        >
+                          Clear all
+                        </button>
+                      </div>
+                      {matchingHistory.map((h, i) => (
+                        <div
+                          key={i}
+                          className="suggestion-item"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setSearchQuery(h);
+                            doSearch(h);
+                          }}
+                        >
+                          <span className="suggest-icon">
+                            <ClockIcon />
+                          </span>
+                          <span className="suggest-item-text">{h}</span>
+                          <button
+                            className="suggest-delete-btn"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeFromSearchHistory(h);
+                            }}
+                            title="Remove"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {suggestions.length > 0 && (
+                    <>
+                      {matchingHistory.length > 0 && (
+                        <div className="suggest-divider" />
+                      )}
+                      <div className="suggest-section-header">
+                        <span>Suggestions</span>
+                      </div>
+                      {suggestions.map((s, i) => (
+                        <div
+                          key={i}
+                          className="suggestion-item"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setSearchQuery(s);
+                            doSearch(s);
+                          }}
+                        >
+                          <span className="suggest-icon">
+                            <SearchIcon size={13} color="var(--text3)" />
+                          </span>
+                          <span className="suggest-item-text">{s}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              );
+            })()}
           </form>
 
           <div className="topbar-actions">
@@ -2804,56 +3478,117 @@ export default function App() {
 
         {/* ── Home ──────────────────────────────────────────────────────── */}
         {view === "home" && !loading && (
-          <div className="page">
+          <div className="page" ref={homePageRef}>
             {homeShelves.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">♫</div>
                 <p>Loading…</p>
               </div>
             ) : (
-              homeShelves.map((shelf, i) => (
-                <section key={i} className="shelf">
-                  <div className="shelf-header">
-                    <h2 className="shelf-title">{shelf.title}</h2>
-                    {shelf.browseId && (
-                      <button
-                        className="shelf-more-btn"
-                        onClick={() => loadPlaylist(shelf.browseId!)}
-                      >
-                        See all →
-                      </button>
-                    )}
-                  </div>
-                  <div className="shelf-grid">
-                    {shelf.contents?.slice(0, 8).map((item, j) => (
-                      <TrackCard
-                        key={
-                          item.videoId ?? item.playlistId ?? item.browseId ?? j
-                        }
-                        item={item}
-                        onPlay={playTrack}
-                        currentId={player.track?.videoId}
-                        playing={player.playing}
-                        onArtistClick={loadArtist}
-                        onPlaylistOpen={loadPlaylist}
-                        onHover={handleHoverPrefetch}
-                      />
-                    ))}
-                  </div>
-                </section>
-              ))
+              homeShelves.map((shelf, i) => {
+                const items = (shelf.contents ?? []).filter(Boolean);
+                const total = items.length;
+                const preview = items.slice(0, 8);
+                return (
+                  <section key={i} className="shelf">
+                    <div className="shelf-header">
+                      <h2 className="shelf-title">{shelf.title}</h2>
+                      {total > 8 && (
+                        // Open every shelf in the in-app shelf page (renders the
+                        // contents we already have). Reliable for all shelves —
+                        // personalized ones (Quick picks, Listen again) carry a
+                        // FEmusic_ feed browseId that the playlist endpoint can't
+                        // load, so routing those through loadPlaylist would 500.
+                        <button
+                          className="shelf-more-btn"
+                          onClick={() => openShelfPage(shelf)}
+                        >
+                          See all →
+                        </button>
+                      )}
+                    </div>
+                    <div className="shelf-grid">
+                      {preview?.map((item, j) => (
+                        <TrackCard
+                          key={
+                            item.videoId ??
+                            item.playlistId ??
+                            item.browseId ??
+                            j
+                          }
+                          item={item}
+                          idx={j}
+                          onPlay={playTrack}
+                          currentId={player.track?.videoId}
+                          playing={player.playing}
+                          onArtistClick={loadArtist}
+                          onPlaylistOpen={loadPlaylist}
+                          onAlbumOpen={loadAlbum}
+                          onPodcastOpen={loadPodcast}
+                          onHover={handleHoverPrefetch}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                );
+              })
             )}
           </div>
         )}
 
+        {/* ── Shelf detail ─────────────────────────────────────────────────── */}
+        {view === "shelf" &&
+          openShelf &&
+          (() => {
+            const items = (openShelf.contents ?? []).filter(Boolean);
+            return (
+              <div className="page">
+                <div className="page-header">
+                  <button className="back-btn" onClick={goBack}>
+                    ← Back
+                  </button>
+                  <h2 className="page-title">{openShelf.title}</h2>
+                  <span className="track-count">{items.length} items</span>
+                </div>
+                <div className="shelf-grid">
+                  {items.map((item, j) => (
+                    <TrackCard
+                      key={
+                        item.videoId ?? item.playlistId ?? item.browseId ?? j
+                      }
+                      item={item}
+                      idx={j}
+                      onPlay={playTrack}
+                      currentId={player.track?.videoId}
+                      playing={player.playing}
+                      onArtistClick={loadArtist}
+                      onPlaylistOpen={loadPlaylist}
+                      onAlbumOpen={loadAlbum}
+                      onPodcastOpen={loadPodcast}
+                      onHover={handleHoverPrefetch}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
         {/* ── Search results ──────────────────────────────────────────────── */}
         {view === "search" && !loading && (
           <div className="page">
-            <h2 className="page-title">
-              {searchResults.length > 0
-                ? `Results for "${searchQuery}"`
-                : "Search"}
-            </h2>
+            <div className="page-header">
+              <button
+                className="back-btn"
+                onClick={() => setView(searchOriginRef.current)}
+              >
+                ← Back
+              </button>
+              <h2 className="page-title">
+                {searchResults.length > 0
+                  ? `Results for "${searchQuery}"`
+                  : "Search"}
+              </h2>
+            </div>
             {searchResults.length === 0 ? (
               <div className="empty-state">
                 <p>Type something and press Enter.</p>
@@ -2909,7 +3644,11 @@ export default function App() {
                   >
                     <div className="card-thumb">
                       {pl.thumbnails?.[0] && (
-                        <img src={thumb(pl.thumbnails, 200)} alt={pl.title} loading="lazy" />
+                        <img
+                          src={thumb(pl.thumbnails, 200)}
+                          alt={pl.title}
+                          loading="lazy"
+                        />
                       )}
                       <div className="card-play-btn">
                         <PlayIcon />
@@ -3022,8 +3761,11 @@ export default function App() {
                 <div className="artist-header-avatar">
                   {openArtist.thumbnails?.[0] && (
                     <img
-                      src={thumb(openArtist.thumbnails, 200)}
+                      src={thumb(openArtist.thumbnails, 400)}
                       alt=""
+                      loading="eager"
+                      decoding="async"
+                      fetchPriority="high"
                       onError={thumbOnError()}
                     />
                   )}
@@ -3181,8 +3923,11 @@ export default function App() {
                 <div className="album-cover">
                   {openAlbum.thumbnails?.[0] ? (
                     <img
-                      src={thumb(openAlbum.thumbnails, 240)}
+                      src={thumb(openAlbum.thumbnails, 400)}
                       alt=""
+                      loading="eager"
+                      decoding="async"
+                      fetchPriority="high"
                       onError={thumbOnError()}
                     />
                   ) : (
@@ -3293,7 +4038,11 @@ export default function App() {
             </form>
             {artistResults.length === 0 ? (
               <div className="empty-state">
-                <p>{ytmConnected ? "No library artists yet." : "Search for an artist above."}</p>
+                <p>
+                  {ytmConnected
+                    ? "No library artists yet."
+                    : "Search for an artist above."}
+                </p>
               </div>
             ) : (
               <div className="shelf-grid">
@@ -3348,7 +4097,11 @@ export default function App() {
             </form>
             {albumResults.length === 0 ? (
               <div className="empty-state">
-                <p>{ytmConnected ? "No saved albums yet." : "Search for an album above."}</p>
+                <p>
+                  {ytmConnected
+                    ? "No saved albums yet."
+                    : "Search for an album above."}
+                </p>
               </div>
             ) : (
               <div className="shelf-grid">
@@ -3381,16 +4134,151 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Podcasts (coming soon) ────────────────────────────────────────── */}
+        {/* ── Podcasts browse ──────────────────────────────────────────────── */}
         {view === "podcasts" && (
-          <div className="page">
-            <div className="coming-soon">
-              <div className="coming-soon-icon">🎙</div>
-              <h2>Podcasts</h2>
-              <p>Podcast support is coming soon. Stay tuned!</p>
-            </div>
+          <div
+            className="page"
+            ref={podcastsPageRef}
+            onScroll={(e) => {
+              podcastsScrollRef.current = e.currentTarget.scrollTop;
+            }}
+          >
+            <h2 className="page-title">Podcasts</h2>
+            {podcastsLoading && podcastShelves.length === 0 ? (
+              <div className="page-spinner" style={{ margin: "60px auto" }} />
+            ) : podcastShelves.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">🎙</div>
+                <p>No podcasts found. Check your connection and try again.</p>
+              </div>
+            ) : (
+              podcastShelves.map((shelf, i) => {
+                const items = (shelf.contents ?? []).filter(Boolean);
+                const total = items.length;
+                const preview = items.slice(0, 8);
+                return (
+                  <section key={i} className="shelf">
+                    <div className="shelf-header">
+                      <h2 className="shelf-title">{shelf.title}</h2>
+                      {total > 8 && (
+                        <button
+                          className="shelf-more-btn"
+                          onClick={() => openShelfPage(shelf, "podcasts")}
+                        >
+                          See all →
+                        </button>
+                      )}
+                    </div>
+                    <div className="shelf-grid">
+                      {preview.map((item, j) => (
+                        <TrackCard
+                          key={item.browseId ?? j}
+                          item={item}
+                          idx={j}
+                          onPlay={playTrack}
+                          currentId={player.track?.videoId}
+                          playing={player.playing}
+                          onPodcastOpen={loadPodcast}
+                          onHover={handleHoverPrefetch}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                );
+              })
+            )}
           </div>
         )}
+
+        {/* ── Podcast detail ───────────────────────────────────────────────── */}
+        {view === "podcast" && !loading && openPodcast && (() => {
+          const author =
+            typeof openPodcast.author === "string"
+              ? openPodcast.author
+              : openPodcast.author?.name;
+          return (
+            <div className="page album-page">
+              <div className="album-header">
+                <button className="artist-back-btn" onClick={goBack}>
+                  ← Back
+                </button>
+                <div className="album-header-content">
+                  <div className="album-cover">
+                    {openPodcast.thumbnails?.[0] ? (
+                      <img
+                        src={thumb(openPodcast.thumbnails, 400)}
+                        alt=""
+                        loading="eager"
+                        decoding="async"
+                        fetchPriority="high"
+                        onError={thumbOnError()}
+                      />
+                    ) : (
+                      <span className="album-cover-ph">🎙</span>
+                    )}
+                  </div>
+                  <div className="album-header-info">
+                    <div className="album-type">Podcast</div>
+                    <h1 className="album-title">{openPodcast.title}</h1>
+                    {author && <div className="album-meta">{author}</div>}
+                    {openPodcast.description && (
+                      <p className="podcast-desc">{openPodcast.description}</p>
+                    )}
+                    <div className="album-meta">
+                      <span className="album-meta-dot">
+                        {openPodcast.episodes.length} episodes
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="episode-list">
+                {openPodcast.episodes.map((ep, i) => {
+                  const isActive = ep.videoId === player.track?.videoId;
+                  return (
+                    <div
+                      key={ep.videoId ?? i}
+                      className={`episode-item ${isActive ? "active-track" : ""}`}
+                      onClick={() => ep.videoId && playEpisode(ep, openPodcast)}
+                    >
+                      <div className="episode-art">
+                        {(ep.thumbnails?.[0] || ep.videoId) && (
+                          <img
+                            src={
+                              ep.thumbnails?.[0]
+                                ? thumb(ep.thumbnails, 120)
+                                : ytFallback(ep.videoId)
+                            }
+                            alt=""
+                            loading="lazy"
+                            decoding="async"
+                            onError={thumbOnError(ep.videoId)}
+                          />
+                        )}
+                        <div className="episode-play">
+                          {isActive && player.playing ? <PauseIcon /> : <PlayIcon />}
+                        </div>
+                      </div>
+                      <div className="episode-info">
+                        <div className="episode-title">{ep.title}</div>
+                        {ep.description && (
+                          <div className="episode-desc">{ep.description}</div>
+                        )}
+                        <div className="episode-meta">
+                          {ep.date && <span>{ep.date}</span>}
+                          {ep.date && ep.duration && (
+                            <span className="episode-meta-sep">·</span>
+                          )}
+                          {ep.duration && <span>{ep.duration}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ── Explore ──────────────────────────────────────────────────────── */}
         {view === "explore" && (
@@ -3511,11 +4399,15 @@ export default function App() {
                             j
                           }
                           item={item}
+                          idx={j}
                           onPlay={playTrack}
                           currentId={player.track?.videoId}
                           playing={player.playing}
                           onArtistClick={loadArtist}
                           onPlaylistOpen={loadPlaylist}
+                          onAlbumOpen={loadAlbum}
+                          onPodcastOpen={loadPodcast}
+                          onHover={handleHoverPrefetch}
                         />
                       ))}
                     </div>
@@ -3841,7 +4733,10 @@ function TrackCard({
   playing,
   onArtistClick,
   onPlaylistOpen,
+  onAlbumOpen,
+  onPodcastOpen,
   onHover,
+  idx = 99,
 }: {
   item: SearchResult;
   onPlay: (t: Track) => void;
@@ -3849,7 +4744,10 @@ function TrackCard({
   playing: boolean;
   onArtistClick?: (browseId: string) => void;
   onPlaylistOpen?: (id: string) => void;
+  onAlbumOpen?: (browseId: string) => void;
+  onPodcastOpen?: (browseId: string) => void;
   onHover?: (videoId: string, title?: string, artist?: string) => void;
+  idx?: number;
 }) {
   const isActive = !!item.videoId && item.videoId === currentId;
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3859,8 +4757,21 @@ function TrackCard({
       onPlay(item as unknown as Track);
     } else if (item.playlistId && onPlaylistOpen) {
       onPlaylistOpen(item.playlistId);
-    } else if (item.browseId && onArtistClick) {
-      onArtistClick(item.browseId);
+    } else if (item.browseId) {
+      // Podcast show IDs start with "MPSPPL"; album IDs with "MPREb_"; artist/channel
+      // IDs with "UC". Home shelf items use `type` (not `resultType`), so we key off
+      // the browseId prefix rather than relying on resultType.
+      const isAlbum =
+        item.resultType === "album" ||
+        item.browseId.startsWith("MPREb_") ||
+        item.browseId.startsWith("MPAD");
+      if (item.browseId.startsWith("MPSPPL") && onPodcastOpen) {
+        onPodcastOpen(item.browseId);
+      } else if (isAlbum && onAlbumOpen) {
+        onAlbumOpen(item.browseId);
+      } else if (onArtistClick) {
+        onArtistClick(item.browseId);
+      }
     }
   };
 
@@ -3891,7 +4802,8 @@ function TrackCard({
                 : ytFallback(item.videoId)
             }
             alt={item.title}
-            loading="lazy"
+            loading={idx < 4 ? "eager" : "lazy"}
+            decoding="async"
             onError={thumbOnError(item.videoId)}
           />
         )}

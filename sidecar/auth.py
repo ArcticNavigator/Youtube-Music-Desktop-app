@@ -93,14 +93,20 @@ def _build_cookie_client(cookie: str) -> YTMusic:
     return YTMusic(headers)
 
 
-def set_ytmusic_cookie(cookie: str) -> None:
+def set_ytmusic_cookie(cookie: str) -> bool:
     """Store the YT Music session cookie. The browser-auth client is built LAZILY on the
     first authenticated call (get_ytmusic) — so installing the cookie is instant and the
-    /auth/ytmusic-cookie request returns fast (no slow InnerTube calls held on the wire)."""
+    /auth/ytmusic-cookie request returns fast (no slow InnerTube calls held on the wire).
+
+    Returns True if the cookie VALUE changed (a fresh login or a rotated session) — the
+    caller uses that to drop the cached personalized home, so a stale (possibly degraded)
+    feed from the old token state isn't served after a re-auth."""
     global _COOKIE_RAW, _YT_COOKIE
     with _LOCK:
+        changed = _COOKIE_RAW != cookie
         _COOKIE_RAW = cookie
         _YT_COOKIE = None  # rebuilt on next get_ytmusic()
+        return changed
 
 
 def clear_ytmusic_cookie() -> None:

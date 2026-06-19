@@ -149,6 +149,29 @@ def record_first_login(access_token: str) -> dict:
     return {"ok": bool(r.get("ok")), "created": bool(r.get("created"))}
 
 
+def submit_feedback(type: str, message: str, email: str | None = None,
+                    app_version: str | None = None, platform_str: str | None = None,
+                    diagnostics: dict | None = None,
+                    access_token: str | None = None) -> dict:
+    """Send a feedback / bug report to the `feedback` Edge Function. The access token
+    is OPTIONAL — when present the function links the account (user_sub) and prefills
+    the email; guests can submit without it. Raises on a non-OK function response."""
+    body = {
+        "type": type,
+        "message": message,
+        "email": email,
+        "app_version": app_version,
+        "platform": platform_str,
+        "diagnostics": diagnostics,
+    }
+    if access_token:
+        body["access_token"] = access_token
+    r = _call("feedback", method="POST", body=body)
+    if r.get("error"):
+        raise RuntimeError(str(r.get("error")))
+    return {"ok": bool(r.get("ok"))}
+
+
 def get_my_data(access_token: str) -> dict:
     """Data-subject export: the caller's own stored row (or null)."""
     r = _call("me-data", method="GET", google_token=access_token)

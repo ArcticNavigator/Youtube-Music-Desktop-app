@@ -158,8 +158,14 @@ def add_to_playlist(playlist_id: str, video_id: str) -> dict:
         data=body, method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            # Already in the playlist — treat as success (idempotent).
+            return {"id": None, "alreadyExists": True}
+        raise
 
 
 def remove_from_playlist(item_id: str) -> bool:
@@ -172,5 +178,11 @@ def remove_from_playlist(item_id: str) -> bool:
         method="DELETE",
         headers={"Authorization": f"Bearer {token}"},
     )
-    with urllib.request.urlopen(req, timeout=15):
-        return True
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            return True
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            # Already removed — treat as success (idempotent).
+            return True
+        raise
