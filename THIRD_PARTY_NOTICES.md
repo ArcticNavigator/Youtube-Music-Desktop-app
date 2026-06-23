@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-YouTube Music Desktop is built on open-source software and one openly-licensed data
+Tunecat Music is built on open-source software and one openly-licensed data
 set. This file lists those components and their licenses, and gives credit where it's
 required.
 

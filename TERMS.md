@@ -2,7 +2,7 @@
 
 _Last updated: 2026-06-17 · Version 1_
 
-These terms govern your use of **YouTube Music Desktop** ("the App"), an unofficial,
+These terms govern your use of **Tunecat Music** ("the App"), an unofficial,
 personal-use desktop client. By installing, building, running, or contributing to the
 App, you agree to these terms. If you do not agree, do not use the App.
 

@@ -22,7 +22,10 @@
   RMDir /r "$APPDATA\YouTubeMusic"
 
   ; 3) Local app data — the WebView2 user-data store (holds the Google/YTM login
-  ;    cookies) plus any other local app data.
+  ;    cookies) plus any other local app data. The WebView2 folder is named after
+  ;    the app's productName, so wipe both the old ("YouTube Music") and current
+  ;    ("Tunecat Music") names — covers upgrades from the old build and fresh installs.
   RMDir /r "$LOCALAPPDATA\com.youtubemusic.desktop"
   RMDir /r "$LOCALAPPDATA\YouTube Music"
+  RMDir /r "$LOCALAPPDATA\Tunecat Music"
 !macroend

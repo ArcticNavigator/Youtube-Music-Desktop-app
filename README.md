@@ -61,7 +61,7 @@ your computer talking to YouTube, the same way the website does.
    - **Windows:** `.msi` or `.exe`
    - **macOS:** `.dmg`
    - **Linux:** `.AppImage` or `.deb`
-2. Run the installer and launch **YouTube Music** like any other app.
+2. Run the installer and launch **Tunecat Music** like any other app.
 3. That's it, search and playback work immediately in guest mode.
 
 > The app bundles its own helper, so you don't need to install Python or anything

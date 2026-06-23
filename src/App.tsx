@@ -16,7 +16,7 @@ import "./App.css";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DOWNLOAD_DIR = "~/Music/YouTube Music";
+const DOWNLOAD_DIR = "~/Music/Tunecat Music";
 const SUGGEST_DELAY = 300;
 const SEARCH_HISTORY_KEY = "yt-music-search-history";
 const SEARCH_HISTORY_MAX = 15;
