@@ -2555,7 +2555,7 @@ export default function App() {
     return (
       <div className="loading-screen">
         <div className="loading-logo">♫</div>
-        <p>Starting YouTube Music…</p>
+        <p>Starting Tunecat Music…</p>
         <div className="spinner" />
       </div>
     );

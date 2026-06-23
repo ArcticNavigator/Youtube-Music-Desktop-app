@@ -1,4 +1,4 @@
-# YouTube Music Desktop
+# Tunecat Music
 
 A clean, fast, **personal** desktop player for YouTube Music. It lets you search,
 browse artists and albums, open playlists, read lyrics, keep a local listening

@@ -1,4 +1,4 @@
-# YouTube Music Desktop
+# Tunecat Music
 
 _Last updated: 2026-06-17 · Policy version: **1**_
 

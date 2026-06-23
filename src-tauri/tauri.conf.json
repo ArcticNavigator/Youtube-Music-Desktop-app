@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "YouTube Music",
+  "productName": "Tunecat Music",
   "version": "0.1.0",
   "identifier": "com.youtubemusic.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "YouTube Music",
+        "title": "Tunecat Music",
         "width": 1100,
         "height": 720,
         "minWidth": 860,
