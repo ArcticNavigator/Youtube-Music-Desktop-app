@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy — Tunecat Music</title>
+  <meta name="description" content="Privacy policy for the Tunecat Music app: exactly what is collected when you sign in with Google, why, and your rights." />
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      max-width: 760px; margin: 0 auto; padding: 40px 20px 80px;
+      font: 16px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #1a1a1a; background: #fff;
+    }
+    h1 { font-size: 28px; margin: 0 0 4px; }
+    h2 { font-size: 19px; margin: 34px 0 10px; border-bottom: 1px solid #e5e5e5; padding-bottom: 6px; }
+    .meta { color: #666; font-size: 14px; margin-bottom: 24px; }
+    table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f5f5f5; }
+    code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+    a { color: #c00; }
+    ul { padding-left: 22px; }
+    li { margin: 4px 0; }
+    @media (prefers-color-scheme: dark) {
+      body { color: #e6e6e6; background: #121212; }
+      h2 { border-bottom-color: #2a2a2a; }
+      th { background: #1e1e1e; } th, td { border-color: #2a2a2a; }
+      code { background: #1e1e1e; } .meta { color: #999; }
+      a { color: #ff6a6a; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Tunecat Music — Privacy Policy</h1>
+  <p class="meta">Last updated: 2026-06-17 · Policy version: <strong>1</strong></p>
+
+  <p>This is a personal app shared privately with a small group (≤100 people). It is
+  <strong>not</strong> a public product. This policy explains exactly what is collected,
+  why, and your rights.</p>
+
+  <h2>What we collect — and only this</h2>
+  <p>When you <strong>sign in with Google</strong>, one record is created on our server (Supabase):</p>
+  <table>
+    <thead><tr><th>Field</th><th>Why (lawful basis)</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Name</strong></td><td>identifies your account · GDPR Art. 6(1)(b) contract necessity</td></tr>
+      <tr><td><strong>Email</strong></td><td>identifies your account · Art. 6(1)(b)</td></tr>
+      <tr><td><strong>First sign-in time</strong> (UTC)</td><td>account/security history · Art. 6(1)(b)</td></tr>
+      <tr><td><strong>Approximate city / region / country</strong></td><td>sign-in-location &amp; security context · Art. 6(1)(f) legitimate interest</td></tr>
+      <tr><td>Policy version + last-active timestamp</td><td>operate the account, apply retention</td></tr>
+    </tbody>
+  </table>
+  <p>We do <strong>not</strong> store your IP address, precise location, listening history,
+  playlists, or any Google content on our server. Your playlists/liked-songs live in your
+  Google account and are read live via Google's API; your <strong>play history is stored only
+  on your own computer</strong> (<code>%APPDATA%/YouTubeMusic/history.json</code>), never uploaded.</p>
+  <p>If you use <strong>Connect YouTube Music</strong> for full personalization, your YouTube
+  Music <strong>session is stored only on your own device</strong> (in your app-data folder) and
+  is sent <strong>only to YouTube</strong> and the app's local helper to load your personalized
+  content. It is <strong>never</strong> sent to our server. Disconnecting deletes it from your device.</p>
+
+  <h2>Guest mode = no record</h2>
+  <p>If you don't sign in, <strong>nothing</strong> is stored about you. Search, browse and
+  playback work fully in guest mode. Signing in is a free, genuine choice (GDPR Art. 7(4)).</p>
+
+  <h2>How location is derived (privacy-preserving)</h2>
+  <p>Your <strong>approximate</strong> city is resolved <strong>on your device</strong>: the app
+  learns its own public IP from our server, then looks the IP up against a <strong>local</strong>
+  DB-IP database bundled with the app. Your IP is <strong>never</strong> sent to a third-party
+  geolocation service.</p>
+
+  <h2>What we never do</h2>
+  <ul>
+    <li>Never sell your data. Never use your email for marketing or ads (Google API Limited Use).</li>
+    <li>Never share it with third parties.</li>
+  </ul>
+
+  <h2>Your rights</h2>
+  <p>From <strong>Settings</strong> inside the app:</p>
+  <ul>
+    <li><strong>Export my data</strong> — see the exact record we hold (JSON).</li>
+    <li><strong>Delete my data</strong> — permanently erase the record, revoke the app's Google
+    access, and return to guest mode. No retention.</li>
+  </ul>
+  <p>You may also email the contact below to access, correct, or erase your data, or to object to
+  the location field. (Rights under GDPR/UK-GDPR, India DPDP Act 2023, and CCPA/CPRA.)</p>
+
+  <h2>Retention</h2>
+  <p>We keep the record only while your account is active. <strong>Inactive accounts are
+  automatically and permanently erased after 6 months.</strong> When that happens we keep only an
+  <strong>anonymous</strong> counter (country + date, no name/email) so we can see how many accounts
+  lapsed, never an identifiable list of departed users.</p>
+
+  <h2>Security</h2>
+  <p>TLS in transit; Postgres disk encryption at rest; row-level security so no user can read
+  another's record; all privileged access brokered by server-side Edge Functions (the app never
+  holds the database admin key). Your Google refresh token is stored only in your operating
+  system's keychain, never on our server.</p>
+
+  <h2>Grievance / contact</h2>
+  <p><strong>Arctic Navigator</strong> — <a href="mailto:cypher.jscript@gmail.com">cypher.jscript@gmail.com</a><br />
+  (Data Principal grievance contact under India's DPDP Act 2023.)</p>
+
+  <h2>Attribution</h2>
+  <p>IP-to-city data: <strong>DB-IP.com / IP to City Lite</strong> database, licensed under
+  <strong>CC BY 4.0</strong> (<a href="https://creativecommons.org/licenses/by/4.0/">creativecommons.org/licenses/by/4.0/</a>).</p>
+</body>
+</html>

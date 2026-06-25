@@ -44,7 +44,10 @@ src-tauri/gen/schemas
 src-tauri/sidecar-dist/
 build/pyinstaller/
 
-# Internal docs — keep PRIVACY.md only (App.tsx imports it directly via `?raw` at build
-# time); everything else here (smoke-test checklist, TODO, planning notes) stays local.
+# Internal docs stay local. Tracked exceptions: PRIVACY.md (App.tsx imports it via `?raw`
+# at build time) and the GitHub Pages files (privacy.html + .nojekyll, served from /docs).
+# Everything else here (smoke-test checklist, TODO, planning notes) stays local.
 docs/*
 !docs/PRIVACY.md
+!docs/privacy.html
+!docs/.nojekyll
